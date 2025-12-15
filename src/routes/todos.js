@@ -14,7 +14,16 @@ const logger = new Logger('Susan:Todos');
  * POST /api/todo - Add a todo item
  */
 router.post('/todo', async (req, res) => {
-  const { projectPath, title, description, priority, category, discoveredIn, tags } = req.body;
+  // Accept both camelCase and snake_case for flexibility
+  const {
+    projectPath, project_path,
+    title, description, priority,
+    category, status,
+    discoveredIn, discovered_in,
+    tags
+  } = req.body;
+
+  const projPath = project_path || projectPath;
 
   if (!title) {
     return res.status(400).json({ error: 'Title required' });
@@ -23,13 +32,13 @@ router.post('/todo', async (req, res) => {
   try {
     const { data, error } = await from('dev_ai_todos')
       .insert({
-        project_path: projectPath,
+        project_path: projPath,
         title,
         description,
         priority: priority || 'medium',
         category: category || 'general',
-        status: 'pending',
-        discovered_in: discoveredIn,
+        status: status || 'pending',
+        discovered_in: discovered_in || discoveredIn,
         tags: tags || []
       })
       .select('id')
@@ -37,7 +46,7 @@ router.post('/todo', async (req, res) => {
 
     if (error) throw error;
 
-    logger.info('Todo added', { id: data.id, title, projectPath });
+    logger.info('Todo added', { id: data.id, title, project_path: projPath });
     res.json({ success: true, id: data.id });
   } catch (err) {
     logger.error('Todo add failed', { error: err.message });
@@ -76,7 +85,7 @@ router.get('/todos', async (req, res) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    res.json(data || []);
+    res.json({ success: true, todos: data || [] });
   } catch (err) {
     logger.error('Todos fetch failed', { error: err.message });
     res.status(500).json({ error: err.message });

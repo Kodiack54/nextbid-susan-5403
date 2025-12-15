@@ -120,6 +120,43 @@ function printEndpoints(port) {
     Chat:
     POST /api/chat                     Chat with Susan
 
+    Bugs (for Tiffany):
+    GET  /api/bugs?project=...         Get bug reports
+    POST /api/bug                      Report a bug
+    PATCH /api/bug/:id                 Update bug
+    DELETE /api/bug/:id                Delete bug
+
+    Notes (Notepad):
+    GET  /api/notes?project=...        Get notes
+    POST /api/note                     Create note
+    PATCH /api/note/:id                Update note
+    DELETE /api/note/:id               Delete note
+
+    Code Changes:
+    GET  /api/code-changes?project=... Get commit log
+    POST /api/code-change              Log a commit
+
+    Tables:
+    GET  /api/tables?prefix=...        List database tables
+    GET  /api/table/:name/columns      Get table columns
+
+    Files (Susan's Library):
+    GET  /api/files?project_slug=...   List files
+    POST /api/file                     Upload file (base64)
+    DELETE /api/file                   Delete file
+    POST /api/files/organize           Move file between categories
+    GET  /api/files/categories         List filing categories
+    GET  /api/files/stats              Library statistics
+
+  Susan's Filing Categories:
+    bugs/        - Bug screenshots and evidence
+    docs/        - Documentation files, PDFs
+    screenshots/ - UI captures, before/after
+    assets/      - Logos, images, design files
+    discoveries/ - Analysis findings
+    exports/     - Data exports, reports
+    misc/        - Everything else
+
   Ready to organize Claude's memory.
 ====================================
   `);

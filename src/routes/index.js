@@ -23,6 +23,7 @@ const bugsRoutes = require('./bugs');
 const notesRoutes = require('./notes');
 const tablesRoutes = require('./tables');
 const codeChangesRoutes = require('./codeChanges');
+const filesRoutes = require('./files');
 
 const app = express();
 app.use(cors());
@@ -47,5 +48,6 @@ app.use('/api', bugsRoutes);
 app.use('/api', notesRoutes);
 app.use('/api', tablesRoutes);
 app.use('/api', codeChangesRoutes);
+app.use('/api', filesRoutes);
 
 module.exports = app;
