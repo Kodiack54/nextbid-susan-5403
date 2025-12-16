@@ -340,6 +340,416 @@ app.post('/api/summarize', async (req, res) => {
 });
 
 // ============================================
+// PROCESS-DUMP - Process Chad's session dumps
+// ============================================
+
+app.post('/api/process-dump', async (req, res) => {
+  const { sessionId, sourceId, sourceName } = req.body;
+
+  console.log(`[Susan] Processing dump from ${sourceName} (${sessionId})`);
+
+  try {
+    // Get the raw content from the session
+    const { data: session, error: sessError } = await supabase.from('dev_ai_sessions')
+      .select('*')
+      .eq('id', sessionId)
+      .single();
+
+    if (sessError) throw sessError;
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const rawContent = session.raw_content || '';
+    if (!rawContent) {
+      // Mark as processed even if no content
+      await supabase.from('dev_ai_sessions')
+        .update({ status: 'processed', processed_at: new Date().toISOString() })
+        .eq('id', sessionId);
+      return res.json({ success: true, extracted: 0 });
+    }
+
+    // Use GPT to extract structured info from the dump
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are Susan, the AI Librarian. Analyze this terminal/chat dump and extract:
+1. Key decisions made
+2. Tasks/todos mentioned
+3. Important code changes or file modifications
+4. Bugs or issues found
+5. Knowledge worth remembering
+
+Return JSON:
+{
+  "summary": "Brief summary of what happened",
+  "decisions": [{"title": "", "content": ""}],
+  "todos": [{"title": "", "description": "", "priority": "low|medium|high"}],
+  "knowledge": [{"title": "", "content": "", "category": "architecture|bug-fix|config|workflow"}],
+  "project_path": "/detected/project/path or null"
+}`
+        },
+        {
+          role: 'user',
+          content: `Source: ${sourceName}\n\nDump content:\n${rawContent.slice(0, 10000)}`
+        }
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 1500
+    });
+
+    const extracted = JSON.parse(response.choices[0].message.content);
+    const projectPath = extracted.project_path || session.project_path || '/var/www/NextBid_Dev/dev-studio-5000';
+
+    // Store extracted items
+    let itemsStored = 0;
+    const conflicts = [];
+
+    // Store todos - check for conflicts first
+    if (extracted.todos?.length > 0) {
+      for (const todo of extracted.todos) {
+        // Check for similar existing todos
+        const { data: existingTodos } = await supabase.from('dev_ai_todos')
+          .select('id, title, description, priority, status')
+          .eq('project_path', projectPath)
+          .ilike('title', `%${todo.title.split(' ').slice(0, 3).join('%')}%`)
+          .limit(3);
+
+        if (existingTodos && existingTodos.length > 0) {
+          // Check if any existing todo conflicts with new one
+          const conflict = await checkForConflict('todo', todo, existingTodos);
+          if (conflict) {
+            conflicts.push(conflict);
+            continue; // Skip storing this one until conflict resolved
+          }
+        }
+
+        await supabase.from('dev_ai_todos').insert({
+          project_path: projectPath,
+          title: todo.title,
+          description: todo.description,
+          priority: todo.priority || 'medium',
+          status: 'pending',
+          source_session_id: sessionId
+        });
+        itemsStored++;
+      }
+    }
+
+    // Store knowledge - check for conflicts first
+    if (extracted.knowledge?.length > 0) {
+      for (const k of extracted.knowledge) {
+        // Check for similar existing knowledge
+        const { data: existingKnowledge } = await supabase.from('dev_ai_knowledge')
+          .select('id, title, summary, category')
+          .eq('project_path', projectPath)
+          .ilike('title', `%${k.title.split(' ').slice(0, 3).join('%')}%`)
+          .limit(3);
+
+        if (existingKnowledge && existingKnowledge.length > 0) {
+          // Check if any existing knowledge conflicts with new one
+          const conflict = await checkForConflict('knowledge', k, existingKnowledge);
+          if (conflict) {
+            conflicts.push(conflict);
+            continue; // Skip storing until resolved
+          }
+        }
+
+        await supabase.from('dev_ai_knowledge').insert({
+          project_path: projectPath,
+          title: k.title,
+          summary: k.content,
+          category: k.category || 'general',
+          importance: 5,
+          source_session_id: sessionId
+        });
+        itemsStored++;
+      }
+    }
+
+    // Store decisions - check for conflicts
+    if (extracted.decisions?.length > 0) {
+      for (const decision of extracted.decisions) {
+        // Check for conflicting decisions
+        const { data: existingDecisions } = await supabase.from('dev_ai_decisions')
+          .select('id, title, decision, rationale')
+          .eq('project_path', projectPath)
+          .ilike('title', `%${decision.title.split(' ').slice(0, 3).join('%')}%`)
+          .limit(3);
+
+        if (existingDecisions && existingDecisions.length > 0) {
+          const conflict = await checkForConflict('decision', decision, existingDecisions);
+          if (conflict) {
+            conflicts.push(conflict);
+            continue;
+          }
+        }
+
+        await supabase.from('dev_ai_decisions').insert({
+          project_path: projectPath,
+          title: decision.title,
+          decision: decision.content,
+          rationale: decision.rationale || '',
+          session_id: sessionId
+        });
+        itemsStored++;
+      }
+    }
+
+    // If conflicts found, notify user via chat
+    if (conflicts.length > 0) {
+      await notifyUserOfConflicts(projectPath, conflicts);
+    }
+
+    // Update session as processed with summary
+    await supabase.from('dev_ai_sessions')
+      .update({
+        status: 'processed',
+        summary: extracted.summary,
+        processed_at: new Date().toISOString(),
+        processed_by: 'susan',
+        items_extracted: itemsStored,
+        conflicts_found: conflicts.length
+      })
+      .eq('id', sessionId);
+
+    console.log(`[Susan] Processed dump ${sessionId}: ${itemsStored} items extracted, ${conflicts.length} conflicts found`);
+
+    res.json({
+      success: true,
+      summary: extracted.summary,
+      extracted: itemsStored,
+      todos: extracted.todos?.length || 0,
+      knowledge: extracted.knowledge?.length || 0,
+      conflicts: conflicts.length
+    });
+  } catch (err) {
+    console.error('[Susan] Process-dump error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Check if new item conflicts with existing items using GPT
+ */
+async function checkForConflict(itemType, newItem, existingItems) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are Susan, checking for conflicts in a knowledge base.
+Compare the NEW ${itemType} with EXISTING items. A conflict exists if:
+- They describe the same thing but with different/contradicting information
+- One supersedes or invalidates the other
+- They have incompatible priorities or statuses
+
+Return JSON:
+{
+  "hasConflict": boolean,
+  "conflictType": "contradiction|supersedes|duplicate|priority_mismatch" or null,
+  "explanation": "Brief explanation of the conflict" or null,
+  "recommendation": "keep_new|keep_existing|merge|ask_user" or null
+}`
+        },
+        {
+          role: 'user',
+          content: `NEW ${itemType}:\n${JSON.stringify(newItem, null, 2)}\n\nEXISTING items:\n${JSON.stringify(existingItems, null, 2)}`
+        }
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 300,
+      temperature: 0.1
+    });
+
+    const result = JSON.parse(response.choices[0].message.content);
+
+    if (result.hasConflict && result.recommendation === 'ask_user') {
+      return {
+        type: itemType,
+        conflictType: result.conflictType,
+        newItem,
+        existingItems,
+        explanation: result.explanation,
+        recommendation: result.recommendation
+      };
+    }
+
+    return null; // No conflict that needs user input
+  } catch (err) {
+    console.error('[Susan] Conflict check error:', err.message);
+    return null; // On error, just proceed without conflict detection
+  }
+}
+
+/**
+ * Notify user of conflicts via chat message
+ */
+async function notifyUserOfConflicts(projectPath, conflicts) {
+  try {
+    // Store conflicts for later resolution
+    for (const conflict of conflicts) {
+      await supabase.from('dev_ai_conflicts').insert({
+        project_path: projectPath,
+        conflict_type: conflict.type,
+        new_item: conflict.newItem,
+        existing_items: conflict.existingItems,
+        explanation: conflict.explanation,
+        status: 'pending'
+      });
+    }
+
+    // Create a notification message
+    const conflictSummary = conflicts.map(c =>
+      `- ${c.type}: "${c.newItem.title}" - ${c.explanation}`
+    ).join('\n');
+
+    const message = `Hey! I found ${conflicts.length} potential conflict${conflicts.length > 1 ? 's' : ''} while processing recent sessions:
+
+${conflictSummary}
+
+Can you help me sort these out? I don't want to overwrite something important with outdated info.
+
+You can resolve these in the Session Hub under "Pending Conflicts" or just tell me here which version to keep.`;
+
+    // Store as a Susan notification
+    await supabase.from('dev_ai_notifications').insert({
+      type: 'conflict',
+      from_worker: 'susan',
+      project_path: projectPath,
+      title: `${conflicts.length} Conflict${conflicts.length > 1 ? 's' : ''} Found`,
+      message,
+      status: 'unread',
+      metadata: { conflicts }
+    });
+
+    console.log(`[Susan] Created notification for ${conflicts.length} conflicts`);
+  } catch (err) {
+    console.error('[Susan] Failed to notify user of conflicts:', err.message);
+  }
+}
+
+// ============================================
+// CONFLICTS - Manage pending conflicts
+// ============================================
+
+app.get('/api/conflicts', async (req, res) => {
+  const { project_path, status = 'pending' } = req.query;
+
+  try {
+    let query = supabase.from('dev_ai_conflicts')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (project_path) {
+      query = query.eq('project_path', project_path);
+    }
+    if (status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query.limit(50);
+    if (error) throw error;
+
+    res.json({ success: true, conflicts: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/conflicts/resolve', async (req, res) => {
+  const { conflict_id, resolution, keep_item } = req.body;
+  // resolution: 'keep_new' | 'keep_existing' | 'keep_both' | 'discard_both'
+  // keep_item: for 'keep_existing', which existing item ID to keep
+
+  try {
+    const { data: conflict, error: fetchErr } = await supabase.from('dev_ai_conflicts')
+      .select('*')
+      .eq('id', conflict_id)
+      .single();
+
+    if (fetchErr) throw fetchErr;
+    if (!conflict) return res.status(404).json({ error: 'Conflict not found' });
+
+    // Apply resolution
+    if (resolution === 'keep_new') {
+      // Store the new item
+      const newItem = conflict.new_item;
+      const tableName = `dev_ai_${conflict.conflict_type}s`; // todos, knowledge, decisions
+
+      await supabase.from(tableName).insert({
+        project_path: conflict.project_path,
+        title: newItem.title,
+        ...newItem
+      });
+    }
+    // For 'keep_existing', we don't need to do anything - item is already there
+    // For 'keep_both', store the new one alongside existing
+    // For 'discard_both', optionally remove existing items
+
+    // Mark conflict as resolved
+    await supabase.from('dev_ai_conflicts')
+      .update({ status: 'resolved', resolution, resolved_at: new Date().toISOString() })
+      .eq('id', conflict_id);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// NOTIFICATIONS - Susan's messages to user
+// ============================================
+
+app.get('/api/notifications', async (req, res) => {
+  const { status = 'unread', limit = 20 } = req.query;
+
+  try {
+    let query = supabase.from('dev_ai_notifications')
+      .select('*')
+      .eq('from_worker', 'susan')
+      .order('created_at', { ascending: false })
+      .limit(parseInt(limit));
+
+    if (status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json({ success: true, notifications: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/notifications/mark-read', async (req, res) => {
+  const { notification_id, mark_all } = req.body;
+
+  try {
+    if (mark_all) {
+      await supabase.from('dev_ai_notifications')
+        .update({ status: 'read' })
+        .eq('status', 'unread')
+        .eq('from_worker', 'susan');
+    } else if (notification_id) {
+      await supabase.from('dev_ai_notifications')
+        .update({ status: 'read' })
+        .eq('id', notification_id);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
 // QUERY - Search knowledge base
 // ============================================
 
