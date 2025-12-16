@@ -11,6 +11,92 @@ const { Logger } = require('../lib/logger');
 const logger = new Logger('Susan:Catalog');
 
 /**
+ * Look up project from path using dev_project_paths table
+ * Returns { project_id, project_name, project_path } or null if unknown
+ */
+async function lookupProjectFromPath(path) {
+  if (!path) return null;
+
+  try {
+    // First check dev_project_paths for exact match
+    const { data: pathEntry } = await from('dev_project_paths')
+      .select('project_id, label')
+      .eq('path', path)
+      .single();
+
+    if (pathEntry) {
+      // Get the project details
+      const { data: project } = await from('dev_projects')
+        .select('id, name, server_path')
+        .eq('id', pathEntry.project_id)
+        .single();
+
+      if (project) {
+        return {
+          project_id: project.id,
+          project_name: project.name,
+          project_path: project.server_path,
+          matched_via: 'dev_project_paths'
+        };
+      }
+    }
+
+    // Fallback: check dev_projects.server_path directly
+    const { data: directProject } = await from('dev_projects')
+      .select('id, name, server_path')
+      .eq('server_path', path)
+      .single();
+
+    if (directProject) {
+      return {
+        project_id: directProject.id,
+        project_name: directProject.name,
+        project_path: directProject.server_path,
+        matched_via: 'dev_projects'
+      };
+    }
+
+    return null; // Unknown path
+  } catch (err) {
+    logger.warn('Failed to lookup project from path', { error: err.message, path });
+    return null;
+  }
+}
+
+/**
+ * Send notification about unknown project path
+ */
+async function notifyUnknownPath(path, sessionId) {
+  try {
+    // Check if we already notified about this path recently
+    const { data: existing } = await from('dev_ai_notifications')
+      .select('id')
+      .eq('notification_type', 'unknown_path')
+      .ilike('message', `%${path}%`)
+      .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()) // Last 24 hours
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      logger.info('Already notified about this path recently', { path });
+      return;
+    }
+
+    await from('dev_ai_notifications').insert({
+      from_worker: 'susan',
+      notification_type: 'unknown_path',
+      title: 'Unknown Project Path Discovered',
+      message: `I found a session from a path I don't recognize:\n\n${path}\n\nWhich project should this belong to?`,
+      status: 'unread',
+      metadata: { path, sessionId }
+    });
+
+    logger.info('Sent unknown path notification', { path });
+  } catch (err) {
+    logger.error('Failed to send unknown path notification', { error: err.message, path });
+  }
+}
+
+/**
  * Resolve targetProject name to project_path
  * Tries to match project names from dev_projects table
  */
@@ -74,6 +160,23 @@ router.post('/catalog', async (req, res) => {
   if (!extraction) {
     return res.status(400).json({ error: 'extraction required' });
   }
+
+  // Look up project from path - notify if unknown
+  const projectInfo = await lookupProjectFromPath(projectPath);
+  if (!projectInfo) {
+    logger.warn('Unknown project path', { projectPath, sessionId });
+    await notifyUnknownPath(projectPath, sessionId);
+    // Continue processing anyway, but flag it
+  } else {
+    logger.info('Project resolved', {
+      projectPath,
+      projectName: projectInfo.project_name,
+      matchedVia: projectInfo.matched_via
+    });
+  }
+
+  // Use the resolved project's main path for storage (ensures consistency)
+  const resolvedProjectPath = projectInfo?.project_path || projectPath;
 
   logger.info('Catalog received', {
     sessionId,
@@ -174,7 +277,7 @@ router.post('/catalog', async (req, res) => {
       for (const decision of extraction.decisions) {
         try {
           await from('dev_ai_decisions').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             title: decision.title,
             decision: decision.title,
             rationale: decision.rationale || null,
@@ -200,7 +303,7 @@ router.post('/catalog', async (req, res) => {
 
           if (!existing || existing.length === 0) {
             await from('dev_ai_knowledge').insert({
-              project_path: projectPath,
+              project_path: resolvedProjectPath,
               category: item.category || 'general',
               title: item.title,
               summary: item.summary,
@@ -220,7 +323,7 @@ router.post('/catalog', async (req, res) => {
       for (const change of extraction.codeChanges) {
         try {
           await from('dev_ai_code_changes').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             file_path: change.file,
             action: change.action,
             summary: change.summary,
@@ -241,7 +344,7 @@ router.post('/catalog', async (req, res) => {
       for (const commit of extraction.commits) {
         try {
           await from('dev_ai_commits').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             commit_hash: commit.hash || null,
             message: commit.message,
             author: commit.author || 'unknown',
@@ -254,7 +357,7 @@ router.post('/catalog', async (req, res) => {
           // Store as knowledge if commits table doesn't exist
           try {
             await from('dev_ai_knowledge').insert({
-              project_path: projectPath,
+              project_path: resolvedProjectPath,
               category: 'commit',
               title: `Commit: ${commit.message?.slice(0, 50) || 'Unknown'}`,
               summary: JSON.stringify(commit),
@@ -296,7 +399,7 @@ router.post('/catalog', async (req, res) => {
           } else if (change.action !== 'deleted') {
             // Insert new (unless it was deleted)
             await from('dev_ai_structure_items').insert({
-              project_path: projectPath,
+              project_path: resolvedProjectPath,
               path: change.path,
               name: change.name,
               type: change.type || 'file',
@@ -317,7 +420,7 @@ router.post('/catalog', async (req, res) => {
       for (const schema of extraction.schemaChanges) {
         try {
           await from('dev_ai_schema_changes').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             table_name: schema.table,
             action: schema.action,
             columns: schema.columns || [],
@@ -329,7 +432,7 @@ router.post('/catalog', async (req, res) => {
           // Store as knowledge if table doesn't exist
           try {
             await from('dev_ai_knowledge').insert({
-              project_path: projectPath,
+              project_path: resolvedProjectPath,
               category: 'database',
               title: `Schema: ${schema.action} ${schema.table}`,
               summary: schema.description || JSON.stringify(schema),
@@ -357,7 +460,7 @@ router.post('/catalog', async (req, res) => {
 
           if (!existing || existing.length === 0) {
             await from('dev_ai_bugs').insert({
-              project_path: projectPath,
+              project_path: resolvedProjectPath,
               title: bug.title,
               severity: bug.severity || 'medium',
               status: bug.status || 'open',
@@ -389,7 +492,7 @@ router.post('/catalog', async (req, res) => {
       for (const api of extraction.apis) {
         try {
           await from('dev_ai_knowledge').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             category: 'api',
             title: `${api.method} ${api.endpoint}`,
             summary: JSON.stringify({
@@ -412,7 +515,7 @@ router.post('/catalog', async (req, res) => {
       for (const portInfo of extraction.ports) {
         try {
           await from('dev_ai_knowledge').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             category: 'port',
             title: `Port ${portInfo.port}: ${portInfo.service}`,
             summary: portInfo.description || `${portInfo.service} runs on port ${portInfo.port}`,
@@ -431,7 +534,7 @@ router.post('/catalog', async (req, res) => {
       for (const dep of extraction.dependencies) {
         try {
           await from('dev_ai_knowledge').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             category: 'dependency',
             title: `${dep.action} ${dep.package}${dep.version ? '@' + dep.version : ''}`,
             summary: dep.reason || `Package ${dep.package} was ${dep.action}`,
@@ -450,7 +553,7 @@ router.post('/catalog', async (req, res) => {
       for (const config of extraction.configChanges) {
         try {
           await from('dev_ai_knowledge').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             category: 'config',
             title: `Config: ${config.setting} in ${config.file}`,
             summary: JSON.stringify({
@@ -483,7 +586,7 @@ router.post('/catalog', async (req, res) => {
 
           if (!existing || existing.length === 0) {
             await from('dev_ai_docs').insert({
-              project_path: projectPath,
+              project_path: resolvedProjectPath,
               title: doc.title,
               content: doc.summary,
               doc_type: doc.type || 'general',
@@ -503,7 +606,7 @@ router.post('/catalog', async (req, res) => {
       for (const error of extraction.errors) {
         try {
           await from('dev_ai_knowledge').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             category: 'error',
             title: `Error: ${error.error.slice(0, 100)}`,
             summary: JSON.stringify({
@@ -535,7 +638,7 @@ router.post('/catalog', async (req, res) => {
 
         // Also log as knowledge
         await from('dev_ai_knowledge').insert({
-          project_path: projectPath,
+          project_path: resolvedProjectPath,
           category: 'build',
           title: `Build ${extraction.buildInfo.buildNumber || extraction.buildInfo.version}`,
           summary: JSON.stringify(extraction.buildInfo),
@@ -554,7 +657,7 @@ router.post('/catalog', async (req, res) => {
       for (const mention of extraction.projectMentions) {
         try {
           await from('dev_ai_knowledge').insert({
-            project_path: projectPath,
+            project_path: resolvedProjectPath,
             category: 'project-mention',
             title: `Mentioned: ${mention.project}`,
             summary: JSON.stringify({
