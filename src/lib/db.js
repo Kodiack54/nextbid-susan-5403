@@ -25,7 +25,15 @@ function from(table) {
   return getClient().from(table);
 }
 
+/**
+ * Helper to access storage buckets
+ */
+function storage(bucket) {
+  return getClient().storage.from(bucket);
+}
+
 module.exports = {
   getClient,
-  from
+  from,
+  storage
 };

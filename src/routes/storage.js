@@ -7,7 +7,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { from } = require('../lib/db');
+const { from, storage } = require('../lib/db');
 const { Logger } = require('../lib/logger');
 
 const logger = new Logger('Susan:Storage');

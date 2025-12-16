@@ -24,6 +24,7 @@ const notesRoutes = require('./notes');
 const tablesRoutes = require('./tables');
 const codeChangesRoutes = require('./codeChanges');
 const filesRoutes = require('./files');
+const bucketRoutes = require('./bucket-monitor');
 
 const app = express();
 app.use(cors());
@@ -49,5 +50,6 @@ app.use('/api', notesRoutes);
 app.use('/api', tablesRoutes);
 app.use('/api', codeChangesRoutes);
 app.use('/api', filesRoutes);
+app.use('/api/bucket', bucketRoutes);
 
 module.exports = app;
