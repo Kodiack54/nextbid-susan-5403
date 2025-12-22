@@ -16,11 +16,11 @@ function normalizeProjectPath(path) {
   if (!path) return null;
   
   // Extract project name from full path
-  const match = path.match(/(dev-studio-5000|engine-dev-5101|source-dev-5102|auth-7000|ai-workers)/);
+  const match = path.match(/(kodiack-dashboard-5500|engine-dev-5101|source-dev-5102|auth-7000|ai-workers)/);
   if (match) return match[1];
-  
+
   // Already short form
-  if (['dev-studio-5000', 'engine-dev-5101', 'source-dev-5102', 'auth-7000', 'ai-workers'].includes(path)) {
+  if (['kodiack-dashboard-5500', 'engine-dev-5101', 'source-dev-5102', 'auth-7000', 'ai-workers'].includes(path)) {
     return path;
   }
   
@@ -61,7 +61,7 @@ router.post('/reorganize-projects', async (req, res) => {
       const normalizedExisting = normalizeProjectPath(entry.project_path);
       
       // Then detect from content
-      const detection = detectProject(content, normalizedExisting || 'dev-studio-5000');
+      const detection = detectProject(content, normalizedExisting || 'kodiack-dashboard-5500');
       const finalProject = detection.project;
       
       results.byProject[finalProject] = (results.byProject[finalProject] || 0) + 1;
@@ -128,7 +128,7 @@ router.get('/preview', async (req, res) => {
     const previews = entries.map(entry => {
       const content = [entry.title, entry.summary].filter(Boolean).join(' ');
       const normalized = normalizeProjectPath(entry.project_path);
-      const detection = detectProject(content, normalized || 'dev-studio-5000');
+      const detection = detectProject(content, normalized || 'kodiack-dashboard-5500');
       return {
         id: entry.id,
         title: entry.title?.slice(0, 50),

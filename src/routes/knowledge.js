@@ -66,7 +66,7 @@ router.post('/remember', async (req, res) => {
   try {
     // Use content-based detection to determine correct project
     const contentForDetection = [title, summary, details].filter(Boolean).join(' ');
-    const detection = detectProject(contentForDetection, projectPath || 'dev-studio-5000');
+    const detection = detectProject(contentForDetection, projectPath || 'kodiack-dashboard-5500');
     const finalProject = detection.project;
 
     // Check for new concepts that need subfolders

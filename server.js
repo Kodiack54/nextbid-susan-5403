@@ -403,7 +403,7 @@ Return JSON:
     });
 
     const extracted = JSON.parse(response.choices[0].message.content);
-    const projectPath = extracted.project_path || session.project_path || '/var/www/Kodiack_Studio';
+    const projectPath = extracted.project_path || session.project_path || '/var/www/Studio';
 
     // Store extracted items
     let itemsStored = 0;

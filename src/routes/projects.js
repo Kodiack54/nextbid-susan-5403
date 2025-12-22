@@ -101,7 +101,7 @@ router.post('/detect', async (req, res) => {
   res.json({
     ...detection,
     projectExists,
-    note: projectExists ? null : 'Detected project does not exist. Filing to dev-studio-5000 instead.'
+    note: projectExists ? null : 'Detected project does not exist. Filing to kodiack-dashboard-5500 instead.'
   });
 });
 
