@@ -5,6 +5,11 @@
  * Catalogs knowledge, organizes conversations, provides Claude with
  * persistent memory across sessions. Tracks documentation, todos, and
  * project structures.
+ *
+ * NEW (v2): Filing Clerk duties added
+ * - Consolidates duplicates
+ * - Assigns items to phases
+ * - Updates status when complete
  */
 
 require('dotenv').config();
@@ -26,43 +31,46 @@ async function start() {
   const knowledgeService = require('./src/services/knowledgeService');
   await knowledgeService.initialize();
   logger.info('Knowledge service initialized');
+
   // 3. Start cleaner service (30 min cleanup cycle)
   const cleanerService = require('./src/services/cleanerService');
   cleanerService.start();
+  logger.info('Cleaner service started (30 min cycle)');
+
   // 4. Start session detector (auto /start on new sessions)
   const sessionDetector = require('./src/services/sessionDetector');
   sessionDetector.start();
-    // 5. Start project organizer (auto-create folders)
-    const projectOrganizer = require('./src/services/projectOrganizer');
-    await projectOrganizer.initialize();
-    logger.info('Project organizer initialized (Dewey Decimal System)');
-
-  // 6. Start extraction sorter (processes Chad's extractions)
-  const extractionSorter = require('./src/services/extractionSorter');
-  // DISABLED - using new validator
-  // extractionSorter.startSorter();
-  // 7. Start pipeline processor (flagged -> pending)
-  const pipelineProcessor = require("./src/services/pipelineProcessor");
-  pipelineProcessor.start();
-  logger.info("Pipeline processor started (30s cycle)");
-  logger.info('Extraction sorter started (30s cycle)');
   logger.info('Session detector started (auto /start)');
-  logger.info('Cleaner service started (30 min cycle)');
 
-  // 3. Discover catalogers
+  // 5. Start project organizer (auto-create folders)
+  const projectOrganizer = require('./src/services/projectOrganizer');
+  await projectOrganizer.initialize();
+  logger.info('Project organizer initialized (Dewey Decimal System)');
+
+  // 6. Start processor v2 (Filing Clerk duties - consolidate, assign phases, update status)
+  const processorV2 = require('./src/services/processor-v2');
+  processorV2.start();
+  logger.info('Processor v2 (Filing Clerk duties) started (30 min cycle)');
+
+  // DISABLED - Old services (Jen handles extraction now)
+  // const extractionSorter = require('./src/services/extractionSorter');
+  // const pipelineProcessor = require('./src/services/pipelineProcessor');
+  // const validator = require('./src/services/validator');
+
+  // 7. Discover catalogers
   const catalogerRegistry = require('./src/catalogers/registry');
   await catalogerRegistry.discover();
   logger.info(`Loaded ${catalogerRegistry.count()} catalogers`, {
     catalogers: catalogerRegistry.list().map(c => c.name)
   });
 
-  // 4. Start HTTP server
+  // 8. Start HTTP server
   const app = require('./src/routes');
   const server = app.listen(config.PORT, () => {
     logger.info(`Susan HTTP server listening on port ${config.PORT}`);
   });
 
-  // 5. Ready
+  // 9. Ready
   logger.info('Susan Librarian ready', {
     port: config.PORT,
     catalogers: catalogerRegistry.count(),
@@ -179,6 +187,12 @@ function printEndpoints(port) {
     exports/     - Data exports, reports
     misc/        - Everything else
 
+  Filing Clerk Duties (Every 30 min):
+    - Consolidate duplicate bugs/todos
+    - Assign items to project phases
+    - Mark items complete when done
+    - Aggregate parent project data
+
   Ready to organize Claude's memory.
 ====================================
   `);
@@ -199,29 +213,3 @@ start().catch(err => {
   logger.error('Startup failed', { error: err.message, stack: err.stack });
   process.exit(1);
 });
-
-// ============================================
-// NEW: VALIDATOR - Process flagged items to pending
-// ============================================
-const validator = require('./src/services/validator');
-
-const VALIDATOR_INTERVAL = 30 * 1000; // 30 seconds
-
-async function runValidator() {
-  try {
-    const result = await validator.process();
-    if (result.validated > 0) {
-      console.log('[Susan:Validator] Validated', result.validated, 'items');
-    }
-  } catch (err) {
-    console.error('[Susan:Validator] Error:', err.message);
-  }
-}
-
-// Start validator loop after a brief delay
-setTimeout(() => {
-  console.log('[Susan] Starting validator (30s interval)');
-  setInterval(runValidator, VALIDATOR_INTERVAL);
-  runValidator(); // Run immediately first time
-}, 5000);
-

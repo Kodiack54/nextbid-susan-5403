@@ -1,6 +1,13 @@
 /**
  * Susan Context Routes
- * Provides startup context to Claude - includes Clair's documentation
+ * Provides startup context to Claude
+ *
+ * 3-LAYER MEMORY SYSTEM:
+ * 1. SHORT-TERM: Last 6 hours of transcripts (step-by-step what happened)
+ * 2. LONG-TERM: Susan's stored knowledge, decisions, summaries
+ * 3. CURRENT FOCUS: Ryan's todo list (what to work on NOW)
+ *
+ * INDEPENDENT - No reliance on Clair or other AI team members
  */
 
 const express = require('express');
@@ -10,22 +17,7 @@ const { Logger } = require('../lib/logger');
 const config = require('../lib/config');
 
 const logger = new Logger('Susan:Context');
-const CLAIR_URL = 'http://localhost:5406';
 const RYAN_URL = 'http://localhost:5402';
-
-/**
- * Fetch data from Clair's API
- */
-async function fetchFromClair(endpoint) {
-  try {
-    const response = await fetch(`${CLAIR_URL}${endpoint}`);
-    if (!response.ok) return null;
-    return await response.json();
-  } catch (err) {
-    logger.warn(`Clair fetch failed: ${endpoint}`, { error: err.message });
-    return null;
-  }
-}
 
 /**
  * Fetch data from Ryan's API
@@ -63,24 +55,48 @@ router.get('/context', async (req, res) => {
 async function buildStartupContext(projectPath, userId) {
   const context = {
     greeting: null,
+    // SHORT-TERM MEMORY: Last 6 hours
+    recentTranscripts: [],
     lastSession: null,
-    recentMessages: [],
+    // LONG-TERM MEMORY: Stored knowledge
     relevantKnowledge: [],
-    pendingTasks: [],
+    decisions: [],
     todos: [],
+    bugs: [],
+    // PROJECT INFO
     projectInfo: null,
     ports: [],
     schemas: [],
-    // NEW: Clair's data
-    clairSummary: null,
-    clairDecisions: [],
-    clairLessons: [],
-    clairBugs: [],
-    // NEW: Ryan's project management
+    fileStructure: null,
+    // CURRENT FOCUS: Ryan's priorities
+    ryanTodos: [],
     ryanBriefing: null
   };
 
-  // 1. Get last session for this project
+  // =====================
+  // 1. SHORT-TERM MEMORY: Last 6 hours of transcripts
+  // =====================
+  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+  // Get journal entries from last 6 hours (transcripts, work logs)
+  const { data: recentJournal } = await from('dev_ai_journal')
+    .select('id, entry_type, title, content, project_id, created_at, metadata')
+    .gte('created_at', sixHoursAgo)
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  if (recentJournal?.length > 0) {
+    context.recentTranscripts = recentJournal.map(j => ({
+      type: j.entry_type,
+      title: j.title,
+      content: j.content,
+      project: j.project_id,
+      time: j.created_at,
+      metadata: j.metadata
+    }));
+  }
+
+  // Get last completed session
   let sessionQuery = from('dev_ai_sessions')
     .select('id, project_id, started_at, ended_at, summary')
     .eq('status', 'completed')
@@ -90,36 +106,27 @@ async function buildStartupContext(projectPath, userId) {
   if (projectPath) {
     sessionQuery = sessionQuery.eq('project_id', projectPath);
   }
-  if (userId) {
-    sessionQuery = sessionQuery.eq('user_id', userId);
-  }
 
   const { data: sessions } = await sessionQuery;
-
-  if (sessions && sessions.length > 0) {
-    const session = sessions[0];
+  if (sessions?.length > 0) {
     context.lastSession = {
-      id: session.id,
-      projectPath: session.project_id,
-      startedAt: session.started_at,
-      endedAt: session.ended_at,
-      summary: session.summary
+      id: sessions[0].id,
+      projectPath: sessions[0].project_id,
+      startedAt: sessions[0].started_at,
+      endedAt: sessions[0].ended_at,
+      summary: sessions[0].summary
     };
-
-    const { data: messages } = await from('dev_ai_messages')
-      .select('role, content, created_at')
-      .eq('session_id', session.id)
-      .order('sequence_num', { ascending: false })
-      .limit(config.MAX_RECENT_MESSAGES);
-
-    context.recentMessages = (messages || []).reverse();
   }
 
-  // 2. Get relevant knowledge
+  // =====================
+  // 2. LONG-TERM MEMORY: Stored knowledge
+  // =====================
+
+  // Knowledge base
   let knowledgeQuery = from('dev_ai_knowledge')
-    .select('id, category, title, summary, tags, importance')
+    .select('id, category, title, summary, tags, importance, project_id')
     .order('importance', { ascending: false })
-    .limit(config.MAX_CONTEXT_ITEMS);
+    .limit(config.MAX_CONTEXT_ITEMS || 20);
 
   if (projectPath) {
     knowledgeQuery = knowledgeQuery.or(`project_id.eq.${projectPath},project_id.is.null`);
@@ -128,26 +135,26 @@ async function buildStartupContext(projectPath, userId) {
   const { data: knowledge } = await knowledgeQuery;
   context.relevantKnowledge = knowledge || [];
 
-  // 3. Get pending decisions
+  // Decisions
   let decisionsQuery = from('dev_ai_decisions')
-    .select('title, decision, rationale, created_at')
+    .select('id, title, decision, rationale, created_at, project_id')
     .order('created_at', { ascending: false })
-    .limit(5);
+    .limit(10);
 
   if (projectPath) {
     decisionsQuery = decisionsQuery.eq('project_id', projectPath);
   }
 
   const { data: decisions } = await decisionsQuery;
-  context.pendingTasks = decisions || [];
+  context.decisions = decisions || [];
 
-  // 4. Get pending todos
+  // Todos (from Susan's tables, not Ryan's)
   let todosQuery = from('dev_ai_todos')
-    .select('id, title, description, priority, category, status, created_at')
-    .in('status', ['pending', 'in_progress'])
+    .select('id, title, description, priority, category, status, created_at, project_id')
+    .in('status', ['pending', 'in_progress', 'open', 'unassigned'])
     .order('priority', { ascending: true })
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(15);
 
   if (projectPath) {
     todosQuery = todosQuery.eq('project_id', projectPath);
@@ -156,7 +163,46 @@ async function buildStartupContext(projectPath, userId) {
   const { data: todos } = await todosQuery;
   context.todos = todos || [];
 
-  // 5. Get project structure (ports, services)
+  // Active bugs
+  let bugsQuery = from('dev_ai_bugs')
+    .select('id, title, description, severity, status, created_at, project_id')
+    .in('status', ['open', 'in_progress', 'pending', 'unassigned'])
+    .order('severity', { ascending: true })
+    .limit(10);
+
+  if (projectPath) {
+    bugsQuery = bugsQuery.eq('project_id', projectPath);
+  }
+
+  const { data: bugs } = await bugsQuery;
+  context.bugs = bugs || [];
+
+  // =====================
+  // 3. PROJECT INFO
+  // =====================
+
+  // Port assignments (all of them)
+  const { data: allPorts } = await from('dev_ai_structures')
+    .select('project_id, project_name, ports')
+    .order('project_name', { ascending: true });
+
+  if (allPorts) {
+    const portsList = [];
+    allPorts.forEach(struct => {
+      if (struct.ports && Array.isArray(struct.ports)) {
+        struct.ports.forEach(p => {
+          portsList.push({
+            port: p.port,
+            service: p.service || p.name,
+            project: struct.project_name
+          });
+        });
+      }
+    });
+    context.ports = portsList.sort((a, b) => a.port - b.port);
+  }
+
+  // Project-specific structure
   if (projectPath) {
     const { data: structure } = await from('dev_ai_structures')
       .select('project_id, project_name, ports, services, databases')
@@ -170,25 +216,9 @@ async function buildStartupContext(projectPath, userId) {
         services: structure.services || [],
         databases: structure.databases || []
       };
-      context.ports = structure.ports || [];
     }
-  }
 
-  // 6. Get schema info
-  let schemaQuery = from('dev_ai_schemas')
-    .select('table_name, prefix, column_count, description')
-    .order('table_name', { ascending: true })
-    .limit(20);
-
-  if (projectPath) {
-    schemaQuery = schemaQuery.eq('project_id', projectPath);
-  }
-
-  const { data: schemas } = await schemaQuery;
-  context.schemas = schemas || [];
-
-  // 7. Get file structure
-  if (projectPath) {
+    // File structure
     const { data: fileStructure } = await from('dev_ai_file_structures')
       .select('directories, key_files, updated_at')
       .eq('project_id', projectPath)
@@ -203,75 +233,55 @@ async function buildStartupContext(projectPath, userId) {
     }
   }
 
-  // 8. NEW: Get Clair's data
-  if (projectPath) {
-    const encodedPath = encodeURIComponent(projectPath);
-    
-    // Get journal entries (decisions, lessons, latest work_log)
-    const journalData = await fetchFromClair(`/api/journal/${encodedPath}?limit=20`);
-    if (journalData?.success) {
-      const entries = journalData.entries || [];
-      
-      // Latest daily summary (from clair-daily-summary)
-      const summaries = entries.filter(e => e.created_by === 'clair-daily-summary' && e.entry_type === 'work_log');
-      if (summaries.length > 0) {
-        context.clairSummary = {
-          title: summaries[0].title,
-          content: summaries[0].content?.slice(0, 500),
-          date: summaries[0].created_at
-        };
-      }
-      
-      // Recent decisions (not archived)
-      context.clairDecisions = entries
-        .filter(e => e.entry_type === 'decision' && !e.is_archived)
-        .slice(0, 5)
-        .map(e => ({ title: e.title, content: e.content, date: e.created_at }));
-      
-      // Recent lessons
-      context.clairLessons = entries
-        .filter(e => e.entry_type === 'lesson' && !e.is_archived)
-        .slice(0, 3)
-        .map(e => ({ title: e.title, content: e.content, date: e.created_at }));
-    }
-    
-    // Get active bugs
-    const bugsData = await fetchFromClair(`/api/bugs/${encodedPath}?status=open`);
-    if (bugsData?.success) {
-      context.clairBugs = (bugsData.bugs || []).slice(0, 5).map(b => ({
-        title: b.title,
-        severity: b.severity,
-        description: b.description?.slice(0, 100)
-      }));
-    }
+  // Schema info
+  let schemaQuery = from('dev_ai_schemas')
+    .select('table_name, prefix, column_count, description')
+    .order('table_name', { ascending: true })
+    .limit(30);
+
+  const { data: schemas } = await schemaQuery;
+  context.schemas = schemas || [];
+
+  // =====================
+  // 4. CURRENT FOCUS: Ryan's todos
+  // =====================
+
+  // Get Ryan's actual todo list (what to work on NOW)
+  const ryanTodosData = await fetchFromRyan('/api/todos?status=pending,in_progress');
+  if (ryanTodosData?.success && ryanTodosData.todos) {
+    context.ryanTodos = ryanTodosData.todos.slice(0, 10).map(t => ({
+      id: t.id,
+      title: t.title,
+      priority: t.priority,
+      status: t.status,
+      project: t.project_name
+    }));
   }
 
-  // 9. NEW: Get Ryan's project briefing
-  const ryanData = await fetchFromRyan(`/api/briefing`);
-  if (ryanData?.success && ryanData.data) {
-    const rd = ryanData.data;
+  // Get Ryan's project briefing (priorities, blockers)
+  const ryanBriefingData = await fetchFromRyan('/api/briefing');
+  if (ryanBriefingData?.success && ryanBriefingData.data) {
+    const rd = ryanBriefingData.data;
     context.ryanBriefing = {
       currentFocus: rd.current_focus,
       recommendation: rd.recommendation,
-      inProgress: rd.in_progress?.slice(0, 3),
-      blocked: rd.blocked?.slice(0, 3),
-      recentlyCompleted: rd.recently_completed?.slice(0, 3),
-      tradelines: rd.tradelines,
-      summary: rd.summary
+      inProgress: rd.in_progress?.slice(0, 5),
+      blocked: rd.blocked?.slice(0, 3)
     };
   }
 
-  // 9. Build greeting message
+  // =====================
+  // 5. BUILD GREETING
+  // =====================
   context.greeting = buildGreeting(context);
 
   logger.info('Context built', {
     projectPath,
-    hasLastSession: !!context.lastSession,
-    messageCount: context.recentMessages.length,
+    shortTermItems: context.recentTranscripts.length,
     knowledgeCount: context.relevantKnowledge.length,
     todoCount: context.todos.length,
-    clairDecisions: context.clairDecisions.length,
-    clairBugs: context.clairBugs.length
+    bugCount: context.bugs.length,
+    ryanTodos: context.ryanTodos.length
   });
 
   return context;
@@ -284,92 +294,116 @@ function buildGreeting(context) {
   const parts = [];
 
   parts.push("=== SUSAN'S MEMORY BRIEFING ===");
-  parts.push("Hey Claude, here's everything you need to know:");
+  parts.push("Hey Claude, here's your 3-layer memory restore:");
 
-  // RYAN'S PROJECT BRIEFING (strategic priorities)
-  if (context.ryanBriefing) {
-    const rb = context.ryanBriefing;
-    parts.push(`\n🎯 PROJECT PRIORITIES (from Ryan):`);
-    if (rb.currentFocus) {
-      parts.push(`   CURRENT FOCUS: ${rb.currentFocus[0]?.project?.name} - ${rb.currentFocus[0]?.phase?.name}`);
-      if (rb.currentFocus[0]?.rationale) parts.push(`   └─ ${rb.currentFocus[0]?.rationale}`);
+  // =====================
+  // LAYER 1: SHORT-TERM (Last 6 hours)
+  // =====================
+  parts.push("\n━━━ SHORT-TERM MEMORY (Last 6 Hours) ━━━");
+
+  if (context.recentTranscripts?.length > 0) {
+    parts.push(`📝 ${context.recentTranscripts.length} recent entries:`);
+
+    // Group by type
+    const workLogs = context.recentTranscripts.filter(t => t.type === 'work_log');
+    const decisions = context.recentTranscripts.filter(t => t.type === 'decision');
+    const discoveries = context.recentTranscripts.filter(t => t.type === 'discovery');
+
+    if (workLogs.length > 0) {
+      parts.push(`\n   WORK LOG (${workLogs.length} entries):`);
+      workLogs.slice(0, 5).forEach(w => {
+        const time = new Date(w.time).toLocaleTimeString();
+        parts.push(`   [${time}] ${w.title}`);
+        if (w.content) parts.push(`      ${w.content.slice(0, 150)}...`);
+      });
     }
-    if (rb.recommendation) {
-      parts.push(`   RECOMMENDED NEXT: ${rb.recommendation.project} - ${rb.recommendation.phase}`);
-      if (rb.recommendation.reasons) parts.push(`   └─ ${rb.recommendation.reasons.join(", ")}`);
+
+    if (decisions.length > 0) {
+      parts.push(`\n   DECISIONS MADE (${decisions.length}):`);
+      decisions.slice(0, 3).forEach(d => {
+        parts.push(`   • ${d.title}`);
+      });
     }
-    if (rb.inProgress?.length > 0) {
-      parts.push(`   IN PROGRESS:`);
-      rb.inProgress.forEach(p => parts.push(`      ⏳ ${p.project_name} - ${p.name}`));
+
+    if (discoveries.length > 0) {
+      parts.push(`\n   DISCOVERIES (${discoveries.length}):`);
+      discoveries.slice(0, 3).forEach(d => {
+        parts.push(`   • ${d.title}`);
+      });
     }
-    if (rb.blocked?.length > 0) {
-      parts.push(`   ⚠️ BLOCKED:`);
-      rb.blocked.forEach(p => parts.push(`      🚫 ${p.project_name} - ${p.name} (waiting on: ${p.blocking_project} - ${p.blocking_phase})`));
-    }
-    if (rb.tradelines?.live?.length > 0) {
-      parts.push(`   📊 TRADELINES: ${rb.tradelines.live.length} live, ${rb.tradelines.testing?.length || 0} testing`);
-    }
+  } else {
+    parts.push("   No activity in last 6 hours.");
   }
 
-  // CLAIR'S DAILY SUMMARY (most important - what happened yesterday)
-  if (context.clairSummary) {
-    parts.push(`\n📋 YESTERDAY'S WORK (from Clair):`);
-    parts.push(`   ${context.clairSummary.title}`);
-    parts.push(`   ${context.clairSummary.content}...`);
-  }
-
-  // ACTIVE BUGS (blockers first)
-  if (context.clairBugs?.length > 0) {
-    parts.push("\n🐛 ACTIVE BUGS:");
-    context.clairBugs.forEach(b => {
-      const sev = b.severity === 'critical' ? '🔴' : b.severity === 'high' ? '🟠' : '🟡';
-      parts.push(`   ${sev} ${b.title}`);
-      if (b.description) parts.push(`      └─ ${b.description}`);
-    });
-  }
-
-  // RECENT DECISIONS (so Claude doesn't re-ask)
-  if (context.clairDecisions?.length > 0) {
-    parts.push("\n🎯 RECENT DECISIONS:");
-    context.clairDecisions.forEach(d => {
-      parts.push(`   • ${d.title}`);
-      if (d.content) parts.push(`     └─ ${d.content.slice(0, 100)}${d.content.length > 100 ? '...' : ''}`);
-    });
-  }
-
-  // LESSONS LEARNED
-  if (context.clairLessons?.length > 0) {
-    parts.push("\n📚 LESSONS LEARNED:");
-    context.clairLessons.forEach(l => {
-      parts.push(`   • ${l.title}: ${l.content?.slice(0, 80) || ''}...`);
-    });
-  }
-
-  // Pending Todos
-  if (context.todos?.length > 0) {
-    parts.push("\n✅ TODO LIST:");
-    context.todos.forEach(t => {
-      const priority = t.priority === 'high' ? '🔴' : t.priority === 'medium' ? '🟡' : '🟢';
-      const status = t.status === 'in_progress' ? '⏳' : '⬜';
-      parts.push(`   ${status} ${priority} ${t.title}`);
-    });
-  }
-
-  // Port Assignments
-  if (context.ports?.length > 0) {
-    parts.push("\n🔌 PORTS:");
-    context.ports.forEach(p => {
-      parts.push(`   ${p.port} - ${p.service || p.name}`);
-    });
-  }
-
-  // Last Session
   if (context.lastSession) {
     const ago = timeAgo(new Date(context.lastSession.endedAt));
-    parts.push(`\n⏰ LAST SESSION: ${ago}`);
+    parts.push(`\n   LAST SESSION: ${ago}`);
     if (context.lastSession.summary) {
       parts.push(`   ${context.lastSession.summary.slice(0, 200)}...`);
     }
+  }
+
+  // =====================
+  // LAYER 2: CURRENT FOCUS (Ryan's Priorities)
+  // =====================
+  parts.push("\n━━━ CURRENT FOCUS (What To Work On) ━━━");
+
+  if (context.ryanTodos?.length > 0) {
+    parts.push("🎯 RYAN'S TODO LIST:");
+    context.ryanTodos.forEach(t => {
+      const priority = t.priority === 'high' ? '🔴' : t.priority === 'medium' ? '🟡' : '🟢';
+      const status = t.status === 'in_progress' ? '⏳' : '⬜';
+      parts.push(`   ${status} ${priority} ${t.title}`);
+      if (t.project) parts.push(`      └─ ${t.project}`);
+    });
+  }
+
+  if (context.ryanBriefing) {
+    const rb = context.ryanBriefing;
+    if (rb.currentFocus?.length > 0) {
+      parts.push(`\n   🎯 CURRENT FOCUS:`);
+      rb.currentFocus.slice(0, 2).forEach(cf => {
+        parts.push(`      ${cf.project?.name} - ${cf.phase?.name}`);
+      });
+    }
+    if (rb.blocked?.length > 0) {
+      parts.push(`\n   ⚠️ BLOCKED:`);
+      rb.blocked.forEach(b => {
+        parts.push(`      🚫 ${b.project_name} - waiting on ${b.blocking_project}`);
+      });
+    }
+  }
+
+  // =====================
+  // LAYER 3: LONG-TERM (Stored Knowledge)
+  // =====================
+  parts.push("\n━━━ LONG-TERM MEMORY (Stored Knowledge) ━━━");
+
+  // Active bugs (important!)
+  if (context.bugs?.length > 0) {
+    parts.push("🐛 ACTIVE BUGS:");
+    context.bugs.slice(0, 5).forEach(b => {
+      const sev = b.severity === 'critical' ? '🔴' : b.severity === 'high' ? '🟠' : '🟡';
+      parts.push(`   ${sev} ${b.title}`);
+    });
+  }
+
+  // Pending todos
+  if (context.todos?.length > 0) {
+    parts.push("\n✅ PENDING TODOS:");
+    context.todos.slice(0, 5).forEach(t => {
+      const priority = t.priority === 'high' ? '🔴' : t.priority === 'medium' ? '🟡' : '🟢';
+      parts.push(`   ${priority} ${t.title}`);
+    });
+  }
+
+  // Decisions
+  if (context.decisions?.length > 0) {
+    parts.push("\n🎯 RECENT DECISIONS:");
+    context.decisions.slice(0, 3).forEach(d => {
+      parts.push(`   • ${d.title}`);
+      if (d.decision) parts.push(`     └─ ${d.decision.slice(0, 80)}...`);
+    });
   }
 
   // Knowledge
@@ -380,8 +414,19 @@ function buildGreeting(context) {
     });
   }
 
+  // Port Assignments
+  if (context.ports?.length > 0) {
+    parts.push("\n🔌 PORTS:");
+    context.ports.slice(0, 10).forEach(p => {
+      parts.push(`   :${p.port} - ${p.service}`);
+    });
+    if (context.ports.length > 10) {
+      parts.push(`   ... and ${context.ports.length - 10} more`);
+    }
+  }
+
   parts.push("\n=== END BRIEFING ===");
-  parts.push("Ready to continue where we left off. What's the priority?");
+  parts.push("Memory restored. What should we focus on?");
 
   return parts.join('\n');
 }

@@ -1,5 +1,7 @@
 /**
  * Susan Routes - Main route aggregator
+ *
+ * CLEANED: Removed obsolete routes (quickParse, migrate)
  */
 
 const express = require('express');
@@ -25,11 +27,10 @@ const tablesRoutes = require('./tables');
 const codeChangesRoutes = require('./codeChanges');
 const filesRoutes = require('./files');
 const bucketRoutes = require('./bucket-monitor');
-const quickParseRoutes = require('./quickParse');
-const migrateRoutes = require('./migrate');
 const projectsRoutes = require('./projects');
 const sessionsRoutes = require('./sessions');
-const ideasRoutes = require("./ideas");
+const ideasRoutes = require('./ideas');
+const teamChatRoutes = require('./teamChat');
 
 const app = express();
 app.use(cors());
@@ -56,10 +57,9 @@ app.use('/api', tablesRoutes);
 app.use('/api', codeChangesRoutes);
 app.use('/api', filesRoutes);
 app.use('/api/bucket', bucketRoutes);
-app.use('/api/migrate', migrateRoutes);
 app.use('/api/projects', projectsRoutes);
 app.use('/api/sessions', sessionsRoutes);
 app.use('/api/ideas', ideasRoutes);
-app.use('/api/quick-parse', quickParseRoutes);
+app.use('/api/team-chat', teamChatRoutes);
 
 module.exports = app;

@@ -1,0 +1,270 @@
+/**
+ * Susan Processor v2 - Filing Clerk
+ * Main 30-minute cycle orchestrator
+ *
+ * Duties:
+ * 1. Consolidate duplicates in each project
+ * 2. Assign items to phases based on keywords
+ * 3. Mark items complete when done
+ * 4. For parent projects: aggregate children, combine cross-child duplicates
+ * 5. Never delete knowledge/docs, only consolidate
+ */
+
+const { from } = require('../../../shared/db');
+const { Logger } = require('../lib/logger');
+const consolidator = require('./consolidator');
+const phaseAssigner = require('./phaseAssigner');
+const statusUpdater = require('./statusUpdater');
+
+const logger = new Logger('Susan:Processor');
+
+let isRunning = false;
+let lastCycleStats = null;
+
+// Tables to process
+const TABLES = ['dev_ai_todos', 'dev_ai_bugs'];
+const KNOWLEDGE_TABLES = ['dev_ai_knowledge', 'dev_ai_docs'];
+
+/**
+ * Start the processor service
+ * @param {number} intervalMs - Interval in milliseconds (default 30 min)
+ */
+function start(intervalMs = 30 * 60 * 1000) {
+  logger.info('Processor v2 (Filing Clerk) started', { intervalMs });
+
+  // Run first cycle after 10 seconds
+  setTimeout(runCycle, 10000);
+
+  // Then run on interval
+  setInterval(runCycle, intervalMs);
+}
+
+/**
+ * Run a single processing cycle
+ */
+async function runCycle() {
+  if (isRunning) {
+    logger.info('Processor already running, skipping');
+    return lastCycleStats;
+  }
+
+  isRunning = true;
+  const startTime = Date.now();
+
+  const stats = {
+    cycleStart: new Date().toISOString(),
+    childProjects: { processed: 0, errors: 0 },
+    parentProjects: { processed: 0, errors: 0 },
+    consolidation: { todos: 0, bugs: 0 },
+    phaseAssignment: { todos: 0, bugs: 0 },
+    statusUpdates: { todos: 0, bugs: 0 },
+    duration: 0
+  };
+
+  try {
+    // 1. Get all projects
+    const { data: projects } = await from('dev_projects')
+      .select('id, name, is_parent, parent_id')
+      .order('is_parent', { ascending: false }); // Parents first
+
+    if (!projects?.length) {
+      logger.info('No projects to process');
+      return stats;
+    }
+
+    const parentProjects = projects.filter(p => p.is_parent);
+    const childProjects = projects.filter(p => !p.is_parent && p.parent_id);
+    const orphanProjects = projects.filter(p => !p.is_parent && !p.parent_id);
+
+    // 2. Process child projects first
+    for (const project of [...childProjects, ...orphanProjects]) {
+      try {
+        const result = await processChildProject(project);
+        stats.consolidation.todos += result.consolidation.todos;
+        stats.consolidation.bugs += result.consolidation.bugs;
+        stats.phaseAssignment.todos += result.phaseAssignment.todos;
+        stats.phaseAssignment.bugs += result.phaseAssignment.bugs;
+        stats.statusUpdates.todos += result.statusUpdates.todos;
+        stats.statusUpdates.bugs += result.statusUpdates.bugs;
+        stats.childProjects.processed++;
+      } catch (err) {
+        logger.error('Error processing child project', {
+          projectId: project.id,
+          name: project.name,
+          error: err.message
+        });
+        stats.childProjects.errors++;
+      }
+    }
+
+    // 3. Process parent projects (aggregate from children)
+    for (const parent of parentProjects) {
+      try {
+        await processParentProject(parent, childProjects);
+        stats.parentProjects.processed++;
+      } catch (err) {
+        logger.error('Error processing parent project', {
+          projectId: parent.id,
+          name: parent.name,
+          error: err.message
+        });
+        stats.parentProjects.errors++;
+      }
+    }
+
+    stats.duration = Date.now() - startTime;
+    lastCycleStats = stats;
+
+    // Log summary if anything happened
+    const totalWork = stats.consolidation.todos + stats.consolidation.bugs +
+      stats.phaseAssignment.todos + stats.phaseAssignment.bugs +
+      stats.statusUpdates.todos + stats.statusUpdates.bugs;
+
+    if (totalWork > 0) {
+      logger.info('Cycle complete', {
+        consolidated: stats.consolidation,
+        assigned: stats.phaseAssignment,
+        statusUpdates: stats.statusUpdates,
+        duration: stats.duration + 'ms'
+      });
+    }
+
+  } catch (err) {
+    logger.error('Processor cycle failed', { error: err.message });
+  } finally {
+    isRunning = false;
+  }
+
+  return stats;
+}
+
+/**
+ * Process a single child/orphan project
+ */
+async function processChildProject(project) {
+  const result = {
+    consolidation: { todos: 0, bugs: 0 },
+    phaseAssignment: { todos: 0, bugs: 0 },
+    statusUpdates: { todos: 0, bugs: 0 }
+  };
+
+  // 1. Consolidate duplicates
+  for (const table of TABLES) {
+    const consolResult = await consolidator.consolidateTable(table, project.id);
+    if (table === 'dev_ai_todos') {
+      result.consolidation.todos = consolResult.consolidated;
+    } else {
+      result.consolidation.bugs = consolResult.consolidated;
+    }
+  }
+
+  // 2. Assign phases (if project has a parent)
+  if (project.parent_id) {
+    const phaseResult = await phaseAssigner.assignAllPhases(project.id);
+    result.phaseAssignment.todos = phaseResult.todos;
+    result.phaseAssignment.bugs = phaseResult.bugs;
+  }
+
+  // 3. Update statuses
+  const statusResult = await statusUpdater.updateStatuses(project.id);
+  result.statusUpdates.todos = statusResult.todosUpdated;
+  result.statusUpdates.bugs = statusResult.bugsUpdated;
+
+  return result;
+}
+
+/**
+ * Process a parent project
+ * - Update phase item statuses based on child completion
+ * - Check for cross-child duplicates
+ */
+async function processParentProject(parent, childProjects) {
+  // Get children of this parent
+  const children = childProjects.filter(c => c.parent_id === parent.id);
+
+  if (children.length === 0) return;
+
+  // 1. Update phase item statuses
+  await statusUpdater.updatePhaseItemStatuses(parent.id);
+
+  // 2. Check for cross-child duplicates (items that exist in multiple children)
+  // This is a lighter check - just log warnings for now
+  for (const table of TABLES) {
+    await checkCrossChildDuplicates(table, parent.id, children);
+  }
+}
+
+/**
+ * Check for duplicate items across child projects
+ * Logs warnings but does not auto-merge (cross-project merging is tricky)
+ */
+async function checkCrossChildDuplicates(table, parentId, children) {
+  try {
+    const childIds = children.map(c => c.id);
+
+    // Get all active items from child projects
+    const { data: items } = await from(table)
+      .select('id, title, project_id, status')
+      .in('project_id', childIds)
+      .in('status', ['unassigned', 'open', 'pending', 'active']);
+
+    if (!items || items.length < 2) return;
+
+    // Group by similar title across projects
+    const groups = {};
+
+    for (const item of items) {
+      // Create a simplified key (lowercase, no punctuation)
+      const key = item.title.toLowerCase().replace(/[^\w\s]/g, '').trim();
+
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key].push(item);
+    }
+
+    // Find groups with items from different projects
+    for (const [key, group] of Object.entries(groups)) {
+      const uniqueProjects = new Set(group.map(g => g.project_id));
+
+      if (uniqueProjects.size > 1 && group.length > 1) {
+        logger.warn('Cross-child duplicate detected', {
+          parentId,
+          table,
+          title: group[0].title,
+          inProjects: group.map(g => g.project_id)
+        });
+      }
+    }
+  } catch (err) {
+    logger.error('checkCrossChildDuplicates failed', {
+      table,
+      parentId,
+      error: err.message
+    });
+  }
+}
+
+/**
+ * Get stats from last cycle
+ */
+function getStats() {
+  return {
+    isRunning,
+    lastCycle: lastCycleStats
+  };
+}
+
+/**
+ * Manually trigger a cycle (for testing/API)
+ */
+async function triggerCycle() {
+  return await runCycle();
+}
+
+module.exports = {
+  start,
+  runCycle,
+  getStats,
+  triggerCycle
+};
