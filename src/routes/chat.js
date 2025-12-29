@@ -1,6 +1,9 @@
 /**
  * Susan Chat Routes
  * Direct conversation with Susan
+ *
+ * NOTE: knowledgeClassifier removed - Jen handles classification now
+ * Review queue routes return empty/disabled responses
  */
 
 const express = require('express');
@@ -153,6 +156,7 @@ AI Team at Kodiack Studios:
 - Claude: Lead Programmer - he's the one who actually writes code in the terminal
 - Chad: Developer's Assistant - he watches Claude's sessions and transcribes everything
 - Susan: Developer's Librarian - that's me! I organize all the knowledge and help you find things
+- Jen: Extraction Specialist - she processes all the raw transcripts and extracts knowledge
 - Dev Studio: The dashboard where you interact with us`;
 
   return {
@@ -165,102 +169,50 @@ AI Team at Kodiack Studios:
 module.exports = router;
 
 // ========================================
-// REVIEW QUEUE ROUTES - Susan asks questions
+// REVIEW QUEUE ROUTES - DISABLED
+// knowledgeClassifier removed - Jen handles classification now
 // ========================================
-
-const classifier = require('../services/knowledgeClassifier');
 
 /**
  * GET /api/chat/pending-questions - Get questions Susan needs to ask
+ * DISABLED - Jen handles classification now
  */
 router.get('/pending-questions', async (req, res) => {
-  try {
-    const reviews = await classifier.getPendingReviews(5);
-    const questions = reviews.map(r => classifier.formatReviewQuestion(r));
-    
-    res.json({
-      success: true,
-      count: questions.length,
-      questions
-    });
-  } catch (err) {
-    logger.error('Failed to get pending questions', { error: err.message });
-    res.status(500).json({ error: err.message });
-  }
+  res.json({
+    success: true,
+    count: 0,
+    questions: [],
+    note: 'Classification handled by Jen now'
+  });
 });
 
 /**
  * POST /api/chat/answer-question - User answers Susan's question
+ * DISABLED - Jen handles classification now
  */
 router.post('/answer-question', async (req, res) => {
-  const { reviewId, answer, answeredBy } = req.body;
-  
-  if (!reviewId || !answer) {
-    return res.status(400).json({ error: 'reviewId and answer required' });
-  }
-  
-  try {
-    const result = await classifier.processReviewAnswer(reviewId, answer, answeredBy || 'user');
-    
-    if (result.success) {
-      // Generate a thank you message
-      const thankYou = result.wasCorrection
-        ? `Got it! I'll remember that this is a **${answer}**, not what I thought. Thanks for teaching me!`
-        : `Thanks for confirming! I was pretty sure it was a **${answer}**.`;
-      
-      res.json({
-        success: true,
-        message: thankYou,
-        ...result
-      });
-    } else {
-      res.status(400).json({ success: false, error: result.error });
-    }
-  } catch (err) {
-    logger.error('Failed to process answer', { error: err.message });
-    res.status(500).json({ error: err.message });
-  }
+  res.json({
+    success: false,
+    error: 'Classification handled by Jen now'
+  });
 });
 
 /**
  * GET /api/chat/has-questions - Quick check if Susan has questions
+ * DISABLED - Jen handles classification now
  */
 router.get('/has-questions', async (req, res) => {
-  try {
-    const hasPending = await classifier.hasPendingQuestions();
-    res.json({ hasQuestions: hasPending });
-  } catch (err) {
-    res.json({ hasQuestions: false });
-  }
+  res.json({ hasQuestions: false });
 });
 
 /**
  * POST /api/chat/ask - Susan proactively asks in the chat
- * Returns a formatted question if there are pending reviews
+ * DISABLED - Jen handles classification now
  */
 router.post('/ask', async (req, res) => {
-  try {
-    const reviews = await classifier.getPendingReviews(1);
-    
-    if (reviews.length === 0) {
-      return res.json({
-        success: true,
-        hasQuestion: false,
-        message: null
-      });
-    }
-    
-    const review = reviews[0];
-    const question = classifier.formatReviewQuestion(review);
-    
-    res.json({
-      success: true,
-      hasQuestion: true,
-      question,
-      message: `Hey! I need your help with something. ${review.question_text}`
-    });
-  } catch (err) {
-    logger.error('Failed to get question', { error: err.message });
-    res.status(500).json({ error: err.message });
-  }
+  res.json({
+    success: true,
+    hasQuestion: false,
+    message: null
+  });
 });

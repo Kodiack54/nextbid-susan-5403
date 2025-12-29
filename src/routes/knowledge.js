@@ -1,15 +1,14 @@
 /**
  * Susan Knowledge Routes
  * Query, remember, and manage knowledge base
+ *
+ * NOTE: projectDetector and conceptDetector removed - Jen handles AI extraction
  */
 
 const express = require('express');
 const router = express.Router();
 const { from } = require('../lib/db');
 const { Logger } = require('../lib/logger');
-
-const { detectProject } = require('../services/projectDetector');
-const { ensureConceptFolder } = require('../services/conceptDetector');
 
 const logger = new Logger('Susan:Knowledge');
 
@@ -64,30 +63,8 @@ router.post('/remember', async (req, res) => {
   }
 
   try {
-    // Use content-based detection to determine correct project
-    const contentForDetection = [title, summary, details].filter(Boolean).join(' ');
-    const detection = detectProject(contentForDetection, projectPath || 'kodiack-dashboard-5500');
-    const finalProject = detection.project;
-
-    // Check for new concepts that need subfolders
-    const conceptResult = await ensureConceptFolder(finalProject, contentForDetection);
-    let conceptInfo = null;
-    if (conceptResult?.created) {
-      logger.info('Created new concept folder', {
-        concept: conceptResult.conceptName,
-        subPath: conceptResult.subPath,
-        project: finalProject
-      });
-      conceptInfo = { name: conceptResult.conceptName, path: conceptResult.subPath };
-    }
-
-    if (finalProject !== projectPath) {
-      logger.info('Project override via content detection', {
-        requestedProject: projectPath,
-        detectedProject: finalProject,
-        confidence: detection.confidence
-      });
-    }
+    // Use provided projectPath directly (no AI detection - that's Jen's job now)
+    const finalProject = projectPath || null;
 
     const { data, error } = await from('dev_ai_knowledge')
       .insert({
@@ -105,7 +82,7 @@ router.post('/remember', async (req, res) => {
     if (error) throw error;
 
     logger.info('Knowledge remembered', { id: data.id, title, project: finalProject });
-    res.json({ success: true, id: data.id, project: finalProject, detected: detection.project !== projectPath, concept: conceptInfo });
+    res.json({ success: true, id: data.id, project: finalProject });
   } catch (err) {
     logger.error('Remember failed', { error: err.message });
     res.status(500).json({ error: err.message });
@@ -178,25 +155,25 @@ router.get('/knowledge/category-stats', async (req, res) => {
     const { data, error } = await from('dev_knowledge')
       .select('category, status')
       .eq('status', 'active');
-    
+
     if (error) throw error;
-    
+
     const stats = {
       decision: 0, lesson: 0, system: 0, procedure: 0,
       issue: 0, reference: 0, idea: 0, log: 0
     };
-    
+
     (data || []).forEach(item => {
       if (stats[item.category] !== undefined) {
         stats[item.category]++;
       }
     });
-    
+
     // Get pending review count
     const { data: pending } = await from('dev_knowledge')
       .select('id')
       .eq('status', 'needs_review');
-    
+
     res.json({
       success: true,
       categories: stats,
@@ -213,22 +190,22 @@ router.get('/category-stats', async (req, res) => {
   try {
     const { data, error } = await from('dev_knowledge')
       .select('category, status');
-    
+
     if (error) throw error;
-    
+
     const stats = {
       decision: 0, lesson: 0, system: 0, procedure: 0,
       issue: 0, reference: 0, idea: 0, log: 0
     };
     let pendingReview = 0;
-    
+
     (data || []).forEach(item => {
       if (item.status === 'needs_review') pendingReview++;
       if (item.status === 'active' && stats[item.category] !== undefined) {
         stats[item.category]++;
       }
     });
-    
+
     res.json({
       success: true,
       categories: stats,

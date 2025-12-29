@@ -1,6 +1,8 @@
 /**
  * Susan Message Routes
  * Receives messages from Chad, extracts knowledge
+ *
+ * NOTE: clairClient removed - Susan operates independently
  */
 
 const express = require('express');
@@ -9,7 +11,6 @@ const { from } = require('../lib/db');
 const { extractKnowledge, summarizeSession } = require('../lib/openai');
 const { Logger } = require('../lib/logger');
 const config = require('../lib/config');
-const clairClient = require('../services/clairClient');
 
 const logger = new Logger('Susan:Message');
 
@@ -72,18 +73,6 @@ router.post('/summarize', async (req, res) => {
       summaryPreview: summary.slice(0, 50)
     });
 
-    // Get project path from session for Clair's work log
-    const { data: session } = await from('dev_ai_sessions')
-      .select('project_id')
-      .eq('id', sessionId)
-      .single();
-
-    // Log work session to Clair's journal
-    if (session?.project_id && summary) {
-      await clairClient.logWorkSession(session.project_id, summary, sessionId);
-      logger.info('Work session logged to Clair', { sessionId });
-    }
-
     res.json({ success: true, summary });
   } catch (err) {
     logger.error('Summarization failed', { error: err.message, sessionId });
@@ -126,16 +115,6 @@ async function processForKnowledge(sessionId, projectPath, content) {
         scope: isGlobal ? 'global' : 'project',
         sessionId
       });
-
-      // Forward to Clair's journal if journal-worthy
-      const forwarded = await clairClient.forwardKnowledgeToJournal(effectiveProjectPath, k);
-      if (forwarded) {
-        logger.info('Knowledge forwarded to Clair journal', {
-          category: k.category,
-          title: k.title,
-          scope: isGlobal ? 'global' : 'project'
-        });
-      }
     }
   } catch (err) {
     logger.error('Knowledge extraction failed', { error: err.message, sessionId });

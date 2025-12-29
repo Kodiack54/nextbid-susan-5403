@@ -1,14 +1,13 @@
 /**
  * Susan Knowledge Service
- * Manages knowledge extraction and storage
+ * Query and manage stored knowledge
+ *
+ * NOTE: Extraction is now handled by Jen.
+ * Susan only provides querying and storage APIs.
  */
 
 const { from } = require('../lib/db');
-const { extractKnowledge } = require('../lib/openai');
 const { Logger } = require('../lib/logger');
-const config = require('../lib/config');
-const { detectProject } = require('./projectDetector');
-const { ensureConceptFolder } = require('./conceptDetector');
 
 const logger = new Logger('Susan:KnowledgeService');
 
@@ -21,84 +20,18 @@ async function initialize() {
 }
 
 /**
- * Process content for knowledge extraction
+ * Store knowledge (called by routes, not extraction)
  */
-async function processContent(sessionId, sessionProjectPath, content, metadata = {}) {
-  if (content.length < config.MIN_CONTENT_LENGTH) {
-    return null;
-  }
-
-  try {
-    // Use content-based project detection instead of blindly trusting session
-    const detection = detectProject(content, sessionProjectPath);
-    const projectPath = detection.project;
-    
-    if (detection.project !== sessionProjectPath) {
-      logger.info('Project override via content detection', {
-        sessionProject: sessionProjectPath,
-        detectedProject: detection.project,
-        confidence: detection.confidence,
-        reason: detection.reason
-      });
-    }
-
-    const result = await extractKnowledge(content);
-
-    if (result.shouldRemember && result.knowledge) {
-      return await storeKnowledge(sessionId, projectPath, result.knowledge, metadata);
-    }
-
-    return null;
-  } catch (err) {
-    logger.error('Knowledge processing failed', { error: err.message, sessionId });
-    return null;
-  }
-}
-
-/**
- * Store extracted knowledge with conflict detection
- * If similar knowledge exists, flag conflict for dev review instead of overwriting
- */
-async function storeKnowledge(sessionId, projectPath, knowledge, metadata = {}) {
-  // Check for new concepts that need subfolders
-  const contentForConcept = [knowledge.title, knowledge.summary, knowledge.details].filter(Boolean).join(' ');
-  const conceptResult = await ensureConceptFolder(projectPath, contentForConcept);
-  
-  if (conceptResult?.created) {
-    logger.info('Created new concept folder', {
-      concept: conceptResult.conceptName,
-      subPath: conceptResult.subPath,
-      project: projectPath
-    });
-    // Add concept path to metadata
-    metadata.conceptPath = conceptResult.subPath;
-    metadata.conceptName = conceptResult.conceptName;
-  }
-
-  // Check for potential conflicts with existing knowledge
-  const conflict = await checkForConflicts(projectPath, knowledge);
-
-  if (conflict) {
-    // Flag the conflict instead of storing - dev must review
-    await flagConflict(projectPath, conflict.existingRecord, knowledge, metadata.source);
-    logger.info('Knowledge conflict flagged for review', {
-      existingId: conflict.existingRecord.id,
-      newTitle: knowledge.title
-    });
-    return { conflictFlagged: true, existingId: conflict.existingRecord.id };
-  }
-
-  // No conflict - safe to store
+async function storeKnowledge(projectId, knowledge, metadata = {}) {
   const { data, error } = await from('dev_ai_knowledge').insert({
-    source_session_id: sessionId,
-    project_id: projectPath,
+    project_id: projectId,
     category: knowledge.category,
     title: knowledge.title,
     summary: knowledge.summary,
     details: knowledge.details,
     tags: knowledge.tags || [],
     importance: knowledge.importance || 5,
-    source: metadata.source || 'extraction',
+    source: metadata.source || 'manual',
     cataloger: metadata.cataloger
   }).select('id').single();
 
@@ -117,135 +50,13 @@ async function storeKnowledge(sessionId, projectPath, knowledge, metadata = {}) 
 }
 
 /**
- * Check for conflicts with existing knowledge
- */
-async function checkForConflicts(projectPath, newKnowledge) {
-  // Look for existing knowledge with same category and similar title
-  const { data: existing } = await from('dev_ai_knowledge')
-    .select('id, title, summary, details, category')
-    .eq('category', newKnowledge.category)
-    .or(`project_id.eq.${projectPath},project_id.is.null`)
-    .ilike('title', `%${newKnowledge.title.substring(0, 50)}%`);
-
-  if (!existing || existing.length === 0) {
-    return null;
-  }
-
-  // Check if any existing record has conflicting content
-  for (const record of existing) {
-    const isConflict = detectContentConflict(record, newKnowledge);
-    if (isConflict) {
-      return {
-        existingRecord: record,
-        conflictType: isConflict.type,
-        reason: isConflict.reason
-      };
-    }
-  }
-
-  return null;
-}
-
-/**
- * Detect if new content conflicts with existing
- */
-function detectContentConflict(existing, newKnowledge) {
-  // Same title but different summary/details = potential conflict
-  const titleSimilar = existing.title.toLowerCase().includes(newKnowledge.title.toLowerCase().substring(0, 30)) ||
-                       newKnowledge.title.toLowerCase().includes(existing.title.toLowerCase().substring(0, 30));
-
-  if (titleSimilar) {
-    // Check if summaries differ significantly
-    const existingSummary = (existing.summary || '').toLowerCase();
-    const newSummary = (newKnowledge.summary || '').toLowerCase();
-
-    // If titles are similar but summaries are different, flag as potential conflict
-    if (existingSummary && newSummary && existingSummary !== newSummary) {
-      // Look for contradicting keywords
-      const contradictionPairs = [
-        ['enabled', 'disabled'],
-        ['true', 'false'],
-        ['yes', 'no'],
-        ['required', 'optional'],
-        ['deprecated', 'recommended'],
-        ['removed', 'added'],
-        ['before', 'after'],
-        ['old', 'new']
-      ];
-
-      for (const [word1, word2] of contradictionPairs) {
-        if ((existingSummary.includes(word1) && newSummary.includes(word2)) ||
-            (existingSummary.includes(word2) && newSummary.includes(word1))) {
-          return {
-            type: 'contradiction',
-            reason: `Existing says "${word1}", new says "${word2}"`
-          };
-        }
-      }
-
-      // Different summaries for same topic = potential outdated info
-      return {
-        type: 'outdated',
-        reason: 'Same topic with different information - may need update'
-      };
-    }
-
-    // Exact duplicate
-    if (existingSummary === newSummary) {
-      return {
-        type: 'duplicate',
-        reason: 'Duplicate knowledge entry'
-      };
-    }
-  }
-
-  return null;
-}
-
-/**
- * Flag a conflict for dev review
- */
-async function flagConflict(projectPath, existingRecord, newKnowledge, source) {
-  const { error } = await from('dev_ai_conflicts').insert({
-    project_id: projectPath,
-    existing_table: 'dev_ai_knowledge',
-    existing_id: existingRecord.id,
-    existing_content: existingRecord.details,
-    existing_summary: existingRecord.summary,
-    new_content: newKnowledge.details || newKnowledge.summary,
-    new_source: source,
-    conflict_type: 'contradiction',
-    conflict_description: `New knowledge about "${newKnowledge.title}" may conflict with existing "${existingRecord.title}"`,
-    status: 'pending',
-    flagged_by: 'susan',
-    priority: newKnowledge.importance >= 7 ? 'high' : 'medium'
-  });
-
-  if (error) {
-    logger.error('Failed to flag conflict', { error: error.message });
-  }
-
-  // Create notification
-  await from('dev_ai_notifications').insert({
-    dev_id: 'assigned',
-    project_id: projectPath,
-    notification_type: 'conflict',
-    title: `Knowledge Conflict: ${newKnowledge.title}`,
-    message: `New information may conflict with existing knowledge. Please review.`,
-    related_table: 'dev_ai_knowledge',
-    related_id: existingRecord.id,
-    status: 'unread'
-  });
-}
-
-/**
  * Search knowledge base
  */
 async function search(query, options = {}) {
   const { projectPath, category, limit = 10 } = options;
 
   let dbQuery = from('dev_ai_knowledge')
-    .select('id, category, title, summary, tags, importance, created_at')
+    .select('id, category, title, summary, tags, importance, created_at, project_id')
     .order('importance', { ascending: false })
     .limit(limit);
 
@@ -320,6 +131,19 @@ async function updateImportance(id, importance) {
 }
 
 /**
+ * Get knowledge by ID
+ */
+async function getById(id) {
+  const { data, error } = await from('dev_ai_knowledge')
+    .select('*')
+    .eq('id', id)
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+/**
  * Get knowledge stats
  */
 async function getStats(projectPath = null) {
@@ -351,14 +175,28 @@ async function getStats(projectPath = null) {
   return stats;
 }
 
+/**
+ * Get all categories
+ */
+async function getCategories() {
+  const { data, error } = await from('dev_ai_knowledge')
+    .select('category')
+    .order('category', { ascending: true });
+
+  if (error) throw error;
+
+  const categories = [...new Set((data || []).map(d => d.category))];
+  return categories;
+}
+
 module.exports = {
   initialize,
-  processContent,
   storeKnowledge,
-  checkForConflicts,
   search,
   getByCategory,
   getMostImportant,
   updateImportance,
-  getStats
+  getById,
+  getStats,
+  getCategories
 };
