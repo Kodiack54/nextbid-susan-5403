@@ -17,7 +17,10 @@ const { Logger } = require('../lib/logger');
 const config = require('../lib/config');
 
 const logger = new Logger('Susan:Context');
-const RYAN_URL = 'http://localhost:5402';
+
+// Helper: only filter by project if it's a valid UUID
+function isUUID(str) { return str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str); }
+const RYAN_URL = 'http://localhost:5407';
 
 /**
  * Fetch data from Ryan's API
@@ -103,7 +106,7 @@ async function buildStartupContext(projectPath, userId) {
     .order('ended_at', { ascending: false })
     .limit(1);
 
-  if (projectPath) {
+  if (isUUID(projectPath)) {
     sessionQuery = sessionQuery.eq('project_id', projectPath);
   }
 
@@ -128,7 +131,7 @@ async function buildStartupContext(projectPath, userId) {
     .order('importance', { ascending: false })
     .limit(config.MAX_CONTEXT_ITEMS || 20);
 
-  if (projectPath) {
+  if (isUUID(projectPath)) {
     knowledgeQuery = knowledgeQuery.or(`project_id.eq.${projectPath},project_id.is.null`);
   }
 
@@ -141,7 +144,7 @@ async function buildStartupContext(projectPath, userId) {
     .order('created_at', { ascending: false })
     .limit(10);
 
-  if (projectPath) {
+  if (isUUID(projectPath)) {
     decisionsQuery = decisionsQuery.eq('project_id', projectPath);
   }
 
@@ -156,7 +159,7 @@ async function buildStartupContext(projectPath, userId) {
     .order('created_at', { ascending: false })
     .limit(15);
 
-  if (projectPath) {
+  if (isUUID(projectPath)) {
     todosQuery = todosQuery.eq('project_id', projectPath);
   }
 
@@ -170,7 +173,7 @@ async function buildStartupContext(projectPath, userId) {
     .order('severity', { ascending: true })
     .limit(10);
 
-  if (projectPath) {
+  if (isUUID(projectPath)) {
     bugsQuery = bugsQuery.eq('project_id', projectPath);
   }
 
@@ -203,7 +206,7 @@ async function buildStartupContext(projectPath, userId) {
   }
 
   // Project-specific structure
-  if (projectPath) {
+  if (isUUID(projectPath)) {
     const { data: structure } = await from('dev_ai_structures')
       .select('project_id, project_name, ports, services, databases')
       .eq('project_id', projectPath)

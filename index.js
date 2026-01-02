@@ -6,13 +6,14 @@
  * persistent memory across sessions. Tracks documentation, todos, and
  * project structures.
  *
- * NEW (v2): Filing Clerk duties added
+ * Librarian duties:
+ * - Catalogs and organizes knowledge
  * - Consolidates duplicates
- * - Assigns items to phases
- * - Updates status when complete
+ * - Archives old sessions to summaries
+ * - Maintains project memory
  */
 
-require('dotenv').config();
+require('dotenv').config({ path: __dirname + '/.env' });
 const { Logger } = require('./src/lib/logger');
 
 const logger = new Logger('Susan');
@@ -20,196 +21,69 @@ const logger = new Logger('Susan');
 async function start() {
   logger.info('Starting Susan Librarian...');
 
-  // 1. Load and validate config
   const config = require('./src/lib/config');
-  logger.info('Config loaded', {
-    port: config.PORT,
-    chadUrl: config.CHAD_URL
-  });
+  logger.info('Config loaded', { port: config.PORT, chadUrl: config.CHAD_URL });
 
-  // 2. Initialize knowledge service
   const knowledgeService = require('./src/services/knowledgeService');
   await knowledgeService.initialize();
   logger.info('Knowledge service initialized');
 
-  // 3. Start cleaner service (30 min cleanup cycle)
   const cleanerService = require('./src/services/cleanerService');
   cleanerService.start();
+
+  const cleanTranscriptService = require('./src/services/cleanTranscriptService');
+  cleanTranscriptService.start();
+  logger.info('Clean transcript service started (5 min cycle)');
   logger.info('Cleaner service started (30 min cycle)');
 
-  // 4. Start session detector (auto /start on new sessions)
   const sessionDetector = require('./src/services/sessionDetector');
   sessionDetector.start();
-  logger.info('Session detector started (auto /start)');
+  logger.info('Session detector started');
 
-  // 5. Start project organizer (auto-create folders)
   const projectOrganizer = require('./src/services/projectOrganizer');
   await projectOrganizer.initialize();
-  logger.info('Project organizer initialized (Dewey Decimal System)');
+  logger.info('Project organizer initialized');
 
-  // 6. Start processor v2 (Filing Clerk duties - consolidate, assign phases, update status)
   const processorV2 = require('./src/services/processor-v2');
   processorV2.start();
-  logger.info('Processor v2 (Filing Clerk duties) started (30 min cycle)');
+  logger.info('Processor v2 started (30 min cycle)');
 
-  // DISABLED - Old services (Jen handles extraction now)
-  // const extractionSorter = require('./src/services/extractionSorter');
-  // const pipelineProcessor = require('./src/services/pipelineProcessor');
-  // const validator = require('./src/services/validator');
+  const archiver = require('./src/services/archiver');
+  archiver.start();
 
-  // 7. Discover catalogers
+  const extractionSorter = require('./src/services/extractionSorter');
+  extractionSorter.start();
+  logger.info('Extraction sorter started (5 min cycle)');
+  logger.info('Archiver service started (hourly cycle)');
+
   const catalogerRegistry = require('./src/catalogers/registry');
   await catalogerRegistry.discover();
-  logger.info(`Loaded ${catalogerRegistry.count()} catalogers`, {
-    catalogers: catalogerRegistry.list().map(c => c.name)
-  });
+  logger.info('Catalogers loaded: ' + catalogerRegistry.count());
 
-  // 8. Start HTTP server
   const app = require('./src/routes');
   const server = app.listen(config.PORT, () => {
-    logger.info(`Susan HTTP server listening on port ${config.PORT}`);
+    logger.info('Susan HTTP server listening on port ' + config.PORT);
   });
 
-  // 9. Ready
-  logger.info('Susan Librarian ready', {
-    port: config.PORT,
-    catalogers: catalogerRegistry.count(),
-    pid: process.pid
-  });
+  logger.info('Susan Librarian ready', { port: config.PORT, pid: process.pid });
 
-  printEndpoints(config.PORT);
-
-  // Graceful shutdown
   process.on('SIGTERM', () => {
-    logger.info('SIGTERM received, shutting down...');
-    server.close(() => {
-      logger.info('Susan shutdown complete');
-      process.exit(0);
-    });
+    logger.info('SIGTERM received');
+    server.close(() => process.exit(0));
   });
 
   process.on('SIGINT', () => {
-    logger.info('SIGINT received, shutting down...');
-    server.close(() => {
-      logger.info('Susan shutdown complete');
-      process.exit(0);
-    });
+    logger.info('SIGINT received');
+    server.close(() => process.exit(0));
   });
 }
 
-function printEndpoints(port) {
-  console.log(`
-====================================
-  Susan - AI Team Librarian
-  Port: ${port}
-====================================
-
-  HTTP API:  http://localhost:${port}
-
-  Endpoints:
-    GET  /health                       Health check
-
-    Context:
-    GET  /api/context?project=...      Claude startup context
-
-    Messages (from Chad):
-    POST /api/message                  Process message from Chad
-    POST /api/summarize                Summarize ended session
-
-    Knowledge:
-    GET  /api/query?q=...              Search knowledge
-    POST /api/remember                 Manually add knowledge
-    GET  /api/knowledge/:id            Get specific item
-    GET  /api/categories               List categories
-
-    Documentation:
-    GET  /api/docs?project=...         Get project docs
-    POST /api/docs                     Create/update doc
-
-    Todos:
-    GET  /api/todos?project=...        Get todos
-    POST /api/todo                     Add todo
-    PATCH /api/todo/:id                Update todo
-    GET  /api/todos/stats              Todo statistics
-
-    Structures:
-    GET  /api/structure?project=...    Get file structure
-    POST /api/structure                Save structure
-    POST /api/structure/port           Add port assignment
-    POST /api/structure/service        Add service
-    GET  /api/ports                    All port assignments
-
-    Schemas:
-    GET  /api/schemas                  Get stored schemas
-    POST /api/schema                   Store table schema
-
-    Decisions:
-    GET  /api/decisions                Get decisions
-    POST /api/decision                 Record decision
-
-    Chat:
-    POST /api/chat                     Chat with Susan
-
-    Bugs (for Tiffany):
-    GET  /api/bugs?project=...         Get bug reports
-    POST /api/bug                      Report a bug
-    PATCH /api/bug/:id                 Update bug
-    DELETE /api/bug/:id                Delete bug
-
-    Notes (Notepad):
-    GET  /api/notes?project=...        Get notes
-    POST /api/note                     Create note
-    PATCH /api/note/:id                Update note
-    DELETE /api/note/:id               Delete note
-
-    Code Changes:
-    GET  /api/code-changes?project=... Get commit log
-    POST /api/code-change              Log a commit
-
-    Tables:
-    GET  /api/tables?prefix=...        List database tables
-    GET  /api/table/:name/columns      Get table columns
-
-    Files (Susan's Library):
-    GET  /api/files?project_slug=...   List files
-    POST /api/file                     Upload file (base64)
-    DELETE /api/file                   Delete file
-    POST /api/files/organize           Move file between categories
-    GET  /api/files/categories         List filing categories
-    GET  /api/files/stats              Library statistics
-
-  Susan's Filing Categories:
-    bugs/        - Bug screenshots and evidence
-    docs/        - Documentation files, PDFs
-    screenshots/ - UI captures, before/after
-    assets/      - Logos, images, design files
-    discoveries/ - Analysis findings
-    exports/     - Data exports, reports
-    misc/        - Everything else
-
-  Filing Clerk Duties (Every 30 min):
-    - Consolidate duplicate bugs/todos
-    - Assign items to project phases
-    - Mark items complete when done
-    - Aggregate parent project data
-
-  Ready to organize Claude's memory.
-====================================
-  `);
-}
-
-// Handle uncaught errors
 process.on('uncaughtException', (err) => {
-  logger.error('Uncaught exception', { error: err.message, stack: err.stack });
+  console.error('Uncaught exception:', err);
   process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled rejection', { reason: String(reason) });
-});
-
-// Start Susan
 start().catch(err => {
-  logger.error('Startup failed', { error: err.message, stack: err.stack });
+  console.error('Startup failed:', err);
   process.exit(1);
 });

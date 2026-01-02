@@ -24,4 +24,40 @@ router.get('/', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/sessions
+ * Log a new session for memory persistence
+ */
+router.post('/', async (req, res) => {
+  try {
+    const { project, summary, messages } = req.body;
+    
+    if (!summary) {
+      return res.status(400).json({ success: false, error: 'Summary required' });
+    }
+    
+    const sessionData = {
+      project_id: project || 'unknown',
+      summary: summary,
+      raw_content: JSON.stringify(messages || []),
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString(),
+      status: 'active',
+      source_type: 'claude-code',
+      source_name: 'mcp-session-log'
+    };
+    
+    const { data, error } = await from('dev_ai_sessions')
+      .insert(sessionData);
+    
+    if (error) throw error;
+    
+    console.log('[Sessions] Logged session:', summary.substring(0, 50));
+    res.json({ success: true, id: data?.[0]?.id, logged: true });
+  } catch (error) {
+    console.error('Error logging session:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 module.exports = router;

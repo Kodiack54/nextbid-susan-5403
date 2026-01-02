@@ -31,6 +31,7 @@ const projectsRoutes = require('./projects');
 const sessionsRoutes = require('./sessions');
 const ideasRoutes = require('./ideas');
 const teamChatRoutes = require('./teamChat');
+const pm2Routes = require('./pm2');
 
 const app = express();
 app.use(cors());
@@ -61,5 +62,6 @@ app.use('/api/projects', projectsRoutes);
 app.use('/api/sessions', sessionsRoutes);
 app.use('/api/ideas', ideasRoutes);
 app.use('/api/team-chat', teamChatRoutes);
+app.use('/api/pm2', pm2Routes);
 
 module.exports = app;

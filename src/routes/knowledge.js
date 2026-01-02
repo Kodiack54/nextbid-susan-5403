@@ -56,15 +56,41 @@ router.get('/query', async (req, res) => {
  * POST /api/remember - Manually add knowledge
  */
 router.post('/remember', async (req, res) => {
-  const { category, title, summary, details, tags, projectPath, importance } = req.body;
+  const { category, title, summary, details, tags, projectPath, project, importance } = req.body;
 
   if (!title) {
     return res.status(400).json({ error: 'Title required' });
   }
 
   try {
-    // Use provided projectPath directly (no AI detection - that's Jen's job now)
-    const finalProject = projectPath || null;
+    let finalProjectId = null;
+    const projectInput = (projectPath || project || '').trim().toLowerCase();
+
+    // If project input looks like a UUID, use it directly
+    if (projectInput && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectInput)) {
+      finalProjectId = projectInput;
+    } else if (projectInput) {
+      // Try exact slug match first
+      let { data: proj } = await from('dev_projects')
+        .select('id')
+        .eq('slug', projectInput)
+        .limit(1)
+        .single();
+      
+      // Fallback to name ilike if no slug match
+      if (!proj) {
+        const { data: nameMatch } = await from('dev_projects')
+          .select('id')
+          .ilike('name', `%${projectInput}%`)
+          .limit(1)
+          .single();
+        proj = nameMatch;
+      }
+      
+      if (proj) {
+        finalProjectId = proj.id;
+      }
+    }
 
     const { data, error } = await from('dev_ai_knowledge')
       .insert({
@@ -73,7 +99,7 @@ router.post('/remember', async (req, res) => {
         summary,
         details,
         tags: tags || [],
-        project_id: finalProject,
+        project_id: finalProjectId,
         importance: importance || 5
       })
       .select('id')
@@ -81,8 +107,8 @@ router.post('/remember', async (req, res) => {
 
     if (error) throw error;
 
-    logger.info('Knowledge remembered', { id: data.id, title, project: finalProject });
-    res.json({ success: true, id: data.id, project: finalProject });
+    logger.info('Knowledge remembered', { id: data.id, title, project: finalProjectId });
+    res.json({ success: true, id: data.id, project: finalProjectId });
   } catch (err) {
     logger.error('Remember failed', { error: err.message });
     res.status(500).json({ error: err.message });

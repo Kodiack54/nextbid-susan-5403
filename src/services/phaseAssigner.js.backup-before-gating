@@ -117,8 +117,7 @@ async function assignPhases(table, projectId, parentId) {
       .select('id, title, status')
       .eq('project_id', projectId)
       .is('phase_id', null)
-      .in('status', ['unassigned', 'open', 'pending', 'active'])
-      .not('validated_at', 'is', null); // v2.1: Skip candidates
+      .in('status', ['unassigned', 'open', 'pending', 'active']);
 
     if (!items?.length) {
       return { assigned: 0, skipped: 0 };

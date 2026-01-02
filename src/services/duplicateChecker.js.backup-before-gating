@@ -102,8 +102,7 @@ async function findDuplicates(table, projectId, statuses = ['unassigned', 'open'
   try {
     let query = from(table)
       .select('id, title, project_id, status, created_at')
-      .eq('project_id', projectId)
-      .not('validated_at', 'is', null); // v2.1: Skip candidates
+      .eq('project_id', projectId);
     
     // Filter by statuses
     if (statuses.length > 0) {

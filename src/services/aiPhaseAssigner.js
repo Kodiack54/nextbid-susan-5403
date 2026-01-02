@@ -1,0 +1,563 @@
+/**
+ * Susan AI Phase Assigner
+ * Uses OpenAI to semantically match todos/bugs to project phases
+ * Routes items to correct child projects, then assigns phases
+ * With duplicate detection and merging
+ */
+
+const { from } = require('../lib/db');
+const { Logger } = require('../lib/logger');
+const config = require('../lib/config');
+const OpenAI = require('openai');
+
+const logger = new Logger('Susan:AIPhaseAssigner');
+
+let openai = null;
+
+function getClient() {
+  if (!openai && config.OPENAI_API_KEY) {
+    openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
+  }
+  return openai;
+}
+
+/**
+ * Get child projects for a parent
+ */
+async function getChildProjects(parentId) {
+  const { data: children } = await from('dev_projects')
+    .select('id, name, description')
+    .eq('parent_id', parentId)
+    .order('name', { ascending: true });
+
+  return children || [];
+}
+
+/**
+ * Get phases with their items as context
+ */
+async function getPhaseContext(projectId) {
+  const { data: phases } = await from('dev_project_phases')
+    .select('id, phase_num, name, description')
+    .eq('project_id', projectId)
+    .order('phase_num', { ascending: true });
+
+  if (!phases?.length) return null;
+
+  const phaseContext = [];
+  for (const phase of phases) {
+    const { data: items } = await from('dev_phase_items')
+      .select('title')
+      .eq('phase_id', phase.id)
+      .order('sort_order', { ascending: true });
+
+    phaseContext.push({
+      id: phase.id,
+      num: phase.phase_num,
+      name: phase.name,
+      description: phase.description || '',
+      items: (items || []).map(i => i.title)
+    });
+  }
+
+  return phaseContext;
+}
+
+/**
+ * Build phase list text for GPT context
+ */
+function buildPhaseListText(phases) {
+  return phases.map(p => {
+    const itemList = p.items.length > 0
+      ? `\n     Items: ${p.items.join(', ')}`
+      : '';
+    return `Phase ${p.num}: ${p.name}${p.description ? ` - ${p.description}` : ''}${itemList}`;
+  }).join('\n');
+}
+
+/**
+ * Build child projects list for GPT context
+ */
+function buildChildProjectsText(children) {
+  return children.map((c, i) =>
+    `${i + 1}. ${c.name}${c.description ? ` - ${c.description}` : ''}`
+  ).join('\n');
+}
+
+/**
+ * Use AI to determine which child project an item belongs to
+ */
+async function assignChildProjectAI(item, children) {
+  const client = getClient();
+  if (!client) {
+    logger.warn('No OpenAI client available, skipping child assignment');
+    return null;
+  }
+
+  const childListText = buildChildProjectsText(children);
+
+  try {
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are Susan, an AI assistant helping route tasks to the correct project.
+
+Given a todo/bug item and a list of child projects, determine which project the item belongs to.
+Consider the semantic meaning:
+- "Susan API" issues belong to Susan project
+- "Dashboard upload" issues belong to Dashboard project
+- "Chat logs" issues belong to Chad (transcription) project
+- "Session logs" could be Dashboard or Chad depending on context
+- Generic code issues go to the main Development Studio
+
+Respond with ONLY the project number (1, 2, 3, etc.) and nothing else.
+If you truly cannot determine a project, respond with "0".`
+        },
+        {
+          role: 'user',
+          content: `CHILD PROJECTS:
+${childListText}
+
+ITEM TO ROUTE:
+Title: ${item.title}
+${item.description ? `Description: ${item.description}` : ''}
+Type: ${item.type || 'todo'}
+
+Which project number does this item belong to?`
+        }
+      ],
+      temperature: 0.3,
+      max_tokens: 10
+    });
+
+    const answer = response.choices[0]?.message?.content?.trim();
+    const projectNum = parseInt(answer, 10);
+
+    if (projectNum > 0 && projectNum <= children.length) {
+      const matchedProject = children[projectNum - 1];
+      if (matchedProject) {
+        logger.info('AI assigned child project', {
+          item: item.title.substring(0, 40),
+          project: matchedProject.name
+        });
+        return matchedProject;
+      }
+    }
+
+    return null;
+  } catch (err) {
+    logger.error('AI child project assignment failed', { error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Use AI to determine best phase for a todo/bug
+ */
+async function assignPhaseAI(item, phases) {
+  const client = getClient();
+  if (!client) {
+    logger.warn('No OpenAI client available, skipping AI assignment');
+    return null;
+  }
+
+  const phaseListText = buildPhaseListText(phases);
+
+  try {
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are Susan, an AI assistant helping organize project tasks into phases.
+
+Given a todo/bug item and a list of project phases, determine which phase the item belongs to.
+Consider the semantic meaning, not just keywords. For example:
+- "Developer Calendar" relates to team collaboration/core platform features
+- "API integration" relates to code development
+- "UI redesign" relates to creative/graphics or web development
+
+Respond with ONLY the phase number (1, 2, 3, etc.) and nothing else.
+If you truly cannot determine a phase, respond with "0".`
+        },
+        {
+          role: 'user',
+          content: `PROJECT PHASES:
+${phaseListText}
+
+ITEM TO ASSIGN:
+Title: ${item.title}
+${item.description ? `Description: ${item.description}` : ''}
+Type: ${item.type || 'todo'}
+
+Which phase number does this item belong to?`
+        }
+      ],
+      temperature: 0.3,
+      max_tokens: 10
+    });
+
+    const answer = response.choices[0]?.message?.content?.trim();
+    const phaseNum = parseInt(answer, 10);
+
+    if (phaseNum > 0 && phaseNum <= phases.length) {
+      const matchedPhase = phases.find(p => p.num === phaseNum);
+      if (matchedPhase) {
+        logger.info('AI assigned phase', {
+          item: item.title.substring(0, 40),
+          phase: matchedPhase.name
+        });
+        return matchedPhase;
+      }
+    }
+
+    return null;
+  } catch (err) {
+    logger.error('AI phase assignment failed', { error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Check for duplicates and get merge suggestions
+ */
+async function findDuplicates(items) {
+  const client = getClient();
+  if (!client || items.length < 2) return [];
+
+  const itemList = items.map((item, i) =>
+    `${i + 1}. [${item.type}] ${item.title}`
+  ).join('\n');
+
+  try {
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are Susan, helping identify duplicate or related items that should be merged.
+
+Look for:
+- Items that are essentially the same task worded differently
+- Items that are so closely related they should be combined
+- Items where one is a subset of another
+
+Respond in JSON format:
+{
+  "duplicates": [
+    {"items": [1, 3], "merged_title": "Combined title here", "reason": "why they should merge"}
+  ]
+}
+
+If no duplicates found, respond: {"duplicates": []}`
+        },
+        {
+          role: 'user',
+          content: `ITEMS TO CHECK:\n${itemList}`
+        }
+      ],
+      temperature: 0.2,
+      max_tokens: 500
+    });
+
+    const answer = response.choices[0]?.message?.content?.trim();
+    const parsed = JSON.parse(answer);
+    return parsed.duplicates || [];
+  } catch (err) {
+    logger.error('Duplicate detection failed', { error: err.message });
+    return [];
+  }
+}
+
+/**
+ * Process parent project - route items to children first
+ */
+async function processParentProject(parentId) {
+  // Get child projects
+  const children = await getChildProjects(parentId);
+  if (children.length === 0) {
+    logger.info('No child projects found', { parentId });
+    return { routed: 0, assigned: 0, merged: 0 };
+  }
+
+  // Get phases from parent (phases are defined on parent)
+  const phases = await getPhaseContext(parentId);
+  if (!phases?.length) {
+    return { routed: 0, assigned: 0, merged: 0, noPhases: true };
+  }
+
+  // Get unassigned items on the PARENT project (shouldn't be there)
+  const { data: todos } = await from('dev_ai_todos')
+    .select('id, title, description, status')
+    .eq('project_id', parentId)
+    .in('status', ['unassigned', 'open', 'pending', 'assigned'])
+    .not('validated_at', 'is', null); // v2.1: Skip candidates
+
+  const { data: bugs } = await from('dev_ai_bugs')
+    .select('id, title, description, status')
+    .eq('project_id', parentId)
+    .in('status', ['unassigned', 'open', 'pending', 'assigned'])
+    .not('validated_at', 'is', null); // v2.1: Skip candidates
+
+  const parentItems = [
+    ...(todos || []).map(t => ({ ...t, type: 'todo', table: 'dev_ai_todos' })),
+    ...(bugs || []).map(b => ({ ...b, type: 'bug', table: 'dev_ai_bugs' }))
+  ];
+
+  let routed = 0;
+  let assigned = 0;
+  let merged = 0;
+
+  // Step 1: Route parent items to correct child projects
+  if (parentItems.length > 0) {
+    logger.info('Routing parent items to children', {
+      parentId,
+      count: parentItems.length
+    });
+
+    for (const item of parentItems) {
+      const childProject = await assignChildProjectAI(item, children);
+
+      if (childProject) {
+        // Move item to child project and assign phase
+        const phase = await assignPhaseAI(item, phases);
+
+        // Todos: change status to 'assigned' when phase added
+        // Bugs: keep status as 'open', just add phase
+        const updateData = {
+          project_id: childProject.id,
+          phase_id: phase?.id || null,
+          updated_at: new Date().toISOString()
+        };
+        if (item.type === 'todo' && phase) {
+          updateData.status = 'assigned';
+        }
+
+        await from(item.table)
+          .update(updateData)
+          .eq('id', item.id);
+
+        routed++;
+        if (phase) assigned++;
+
+        logger.info('Routed item to child', {
+          item: item.title.substring(0, 30),
+          child: childProject.name,
+          phase: phase?.name || 'unassigned'
+        });
+      }
+    }
+  }
+
+  // Step 2: Process each child project's unassigned items
+  for (const child of children) {
+    const childResult = await processChildProject(child.id, parentId, phases);
+    assigned += childResult.assigned;
+  }
+
+  // Step 3: Check for duplicates across all items
+  const allItems = [...parentItems];
+  for (const child of children) {
+    const { data: childTodos } = await from('dev_ai_todos')
+      .select('id, title, description, status, project_id')
+      .eq('project_id', child.id)
+      .in('status', ['assigned', 'open', 'pending']);
+
+    const { data: childBugs } = await from('dev_ai_bugs')
+      .select('id, title, description, status, project_id')
+      .eq('project_id', child.id)
+      .in('status', ['assigned', 'open', 'pending']);
+
+    allItems.push(
+      ...(childTodos || []).map(t => ({ ...t, type: 'todo', table: 'dev_ai_todos' })),
+      ...(childBugs || []).map(b => ({ ...b, type: 'bug', table: 'dev_ai_bugs' }))
+    );
+  }
+
+  if (allItems.length >= 2) {
+    const duplicates = await findDuplicates(allItems);
+    merged = await processDuplicates(duplicates, allItems);
+  }
+
+  return { routed, assigned, merged };
+}
+
+/**
+ * Process a child project - just assign phases
+ */
+async function processChildProject(childId, parentId, phases) {
+  // Get unassigned items on this child
+  const { data: todos } = await from('dev_ai_todos')
+    .select('id, title, description, status')
+    .eq('project_id', childId)
+    .is('phase_id', null)
+    .in('status', ['unassigned', 'open', 'pending'])
+    .not('validated_at', 'is', null); // v2.1: Skip candidates
+
+  const { data: bugs } = await from('dev_ai_bugs')
+    .select('id, title, description, status')
+    .eq('project_id', childId)
+    .is('phase_id', null)
+    .in('status', ['unassigned', 'open', 'pending'])
+    .not('validated_at', 'is', null); // v2.1: Skip candidates
+
+  const items = [
+    ...(todos || []).map(t => ({ ...t, type: 'todo', table: 'dev_ai_todos' })),
+    ...(bugs || []).map(b => ({ ...b, type: 'bug', table: 'dev_ai_bugs' }))
+  ];
+
+  if (items.length === 0) return { assigned: 0 };
+
+  let assigned = 0;
+
+  for (const item of items) {
+    const phase = await assignPhaseAI(item, phases);
+
+    if (phase) {
+      // Todos: change status to 'assigned' when phase added
+      // Bugs: keep status as 'open', just add phase
+      const updateData = {
+        phase_id: phase.id,
+        updated_at: new Date().toISOString()
+      };
+      if (item.type === 'todo') {
+        updateData.status = 'assigned';
+      }
+
+      await from(item.table)
+        .update(updateData)
+        .eq('id', item.id);
+
+      assigned++;
+    }
+  }
+
+  return { assigned };
+}
+
+/**
+ * Process duplicate merges
+ */
+async function processDuplicates(duplicates, allItems) {
+  let merged = 0;
+
+  for (const dup of duplicates) {
+    if (dup.items?.length >= 2 && dup.merged_title) {
+      const keepIdx = dup.items[0] - 1;
+      const keepItem = allItems[keepIdx];
+
+      if (keepItem) {
+        // Update the kept item with merged title
+        await from(keepItem.table)
+          .update({
+            title: dup.merged_title,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', keepItem.id);
+
+        // Delete duplicate items (keep the first one with merged title)
+        for (let i = 1; i < dup.items.length; i++) {
+          const mergeIdx = dup.items[i] - 1;
+          const mergeItem = allItems[mergeIdx];
+          if (mergeItem) {
+            await from(mergeItem.table)
+              .delete()
+              .eq('id', mergeItem.id);
+            merged++;
+          }
+        }
+
+        logger.info('Merged duplicates', {
+          kept: keepItem.title.substring(0, 30),
+          merged: dup.items.length - 1,
+          newTitle: dup.merged_title.substring(0, 40)
+        });
+      }
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Get parent ID for a project
+ */
+async function getParentId(projectId) {
+  const { data } = await from('dev_projects')
+    .select('id, parent_id, is_parent')
+    .eq('id', projectId)
+    .single();
+
+  if (!data) return null;
+  if (data.is_parent) return projectId;
+  return data.parent_id;
+}
+
+/**
+ * Check if project is a parent
+ */
+async function isParentProject(projectId) {
+  const { data } = await from('dev_projects')
+    .select('is_parent')
+    .eq('id', projectId)
+    .single();
+
+  return data?.is_parent === true;
+}
+
+/**
+ * Run AI phase assignment for a project
+ * If parent: route items to children, then assign phases
+ * If child: just assign phases using parent's phase definitions
+ */
+async function runAIAssignment(projectId) {
+  try {
+    const isParent = await isParentProject(projectId);
+
+    if (isParent) {
+      // Process parent - route to children first
+      const result = await processParentProject(projectId);
+      logger.info('AI assignment complete (parent)', {
+        projectId,
+        ...result
+      });
+      return result;
+    } else {
+      // Process child - just assign phases
+      const parentId = await getParentId(projectId);
+      if (!parentId) {
+        return { assigned: 0, merged: 0, noParent: true };
+      }
+
+      const phases = await getPhaseContext(parentId);
+      if (!phases?.length) {
+        return { assigned: 0, merged: 0, noPhases: true };
+      }
+
+      const result = await processChildProject(projectId, parentId, phases);
+      logger.info('AI assignment complete (child)', {
+        projectId,
+        ...result
+      });
+      return result;
+    }
+  } catch (err) {
+    logger.error('AI assignment failed', { projectId, error: err.message });
+    return { assigned: 0, merged: 0, error: err.message };
+  }
+}
+
+module.exports = {
+  getPhaseContext,
+  getChildProjects,
+  assignChildProjectAI,
+  assignPhaseAI,
+  findDuplicates,
+  processParentProject,
+  processChildProject,
+  runAIAssignment,
+  getParentId,
+  isParentProject
+};

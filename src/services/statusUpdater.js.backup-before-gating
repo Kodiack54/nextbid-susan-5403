@@ -112,58 +112,38 @@ function findCompletedItems(items, completionKeywords) {
  * Process items written by Jen with status 'complete'
  * Jen writes directly to tables with status already set
  */
-/**
- * Process items written by Jen with completion signals
- * v2.1: No longer auto-changes statuses. Instead writes suggestions to metadata.
- * Real status changes require Claude approval via /extract
- */
 async function processJenUpdates(table, projectId) {
   try {
-    // Find items that have completion signals in metadata
-    // but are still in working statuses
+    // Find items that Jen marked with done-related statuses
+    // but are still in the working statuses
     const { data: items } = await from(table)
       .select('id, title, status, metadata')
       .eq('project_id', projectId)
-      .not('validated_at', 'is', null)  // Only process validated items
-      .in('status', ['open', 'unassigned', 'pending', 'assigned']);
+      .in('status', ['done', 'fixed', 'resolved', 'complete']);
     
-    if (!items?.length) return { suggested: 0 };
+    if (!items?.length) return { updated: 0 };
     
-    let suggested = 0;
+    let updated = 0;
     
     for (const item of items) {
-      const meta = item.metadata || {};
+      // Normalize status
+      const newStatus = table === 'dev_ai_bugs' ? 'resolved' : 'completed';
       
-      // Check if there's a completion signal from Jen
-      if (meta.completion_signal === 'fixed_mentioned') {
-        // Don't change status - just log suggestion to metadata
-        const updatedMeta = {
-          ...meta,
-          suggested_status: table === 'dev_ai_bugs' ? 'resolved' : 'completed',
-          suggested_reason: 'Jen detected completion signal in transcript',
-          suggested_at: new Date().toISOString()
-        };
-        
+      if (item.status !== newStatus) {
         await from(table)
           .update({
-            metadata: updatedMeta,
+            status: newStatus,
             updated_at: new Date().toISOString()
           })
           .eq('id', item.id);
-        
-        suggested++;
-        logger.info('Suggested status change (not applied)', { 
-          table, 
-          itemId: item.id,
-          suggestedStatus: updatedMeta.suggested_status
-        });
+        updated++;
       }
     }
     
-    return { suggested };
+    return { updated };
   } catch (err) {
     logger.error('processJenUpdates failed', { table, projectId, error: err.message });
-    return { suggested: 0, error: err.message };
+    return { updated: 0, error: err.message };
   }
 }
 
@@ -223,7 +203,7 @@ async function updatePhaseItemStatuses(parentId) {
         
         if (allItems.length > 0) {
           const allComplete = allItems.every(i => 
-            ['completed', 'resolved'].includes(i.status)
+            ['completed', 'resolved', 'done', 'fixed'].includes(i.status)
           );
           
           if (allComplete) {
